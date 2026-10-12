@@ -9,6 +9,9 @@ description = "A small, standalone ModularRL model interface reference (not the 
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.23", "torch>=2.0"]
 
+[project.optional-dependencies]
+examples = ["gymnasium>=1.0"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["modular_rl*"]

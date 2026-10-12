@@ -1,9 +1,9 @@
 # ModularRL 아키텍처와 데이터 계약
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
-ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule 참조 구현이다.
-현재 저장소에는 Runner, Agent, Learner 전체와
-학습 알고리즘이 포함되지 않는다.
+ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner 참조 구현이다.
+현재 Tabular Q-learning은 FrozenLake 예제에서 학습할 수 있다.
+Runner, Agent, Neural DQN Learner, WorldModel/Planner는 아직 포함되지 않는다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
 
@@ -369,8 +369,8 @@ assert not priority_error.requires_grad
 
 ### Learner 경계와 알고리즘 재사용
 
-Learner는 Buffer 샘플링과 Batch device/dtype을 관리하고 Model에서 prediction과
-Bootstrap 후보를 계산한다. Buffer는 정수 관측·행동 dtype을 보존하므로 Tabular update에
+학습 호출자가 Buffer를 샘플링하고 Learner는 Batch device/dtype을 관리하며 Model에서
+prediction과 Bootstrap 후보를 계산한다. Buffer는 정수 관측·행동 dtype을 보존하므로 Tabular update에
 전달하는 indices는 호출자가 long으로 정규화한다. 정수 reward도 호출자가 target 계산용
 floating dtype으로 변환한다. UpdateRule과 TargetGenerator는 이런 변환을 하지 않는다.
 
@@ -387,9 +387,9 @@ DQN/Double DQN용 별도 Loss Rule은 필요하지 않다. 복수 Critic 중 어
 Learner가 명시적으로 선택하며 Rule은 EstimatorOutput을 해석하지 않는다.
 
 Optimizer의 zero_grad/backward/step, gradient clipping·누적, Target Model 갱신은
-Learner 책임이다. 첫 Learner의 최소 진입점은 `learn(batch)`로 두고, 그 내부에서
-prediction -> target -> Tabular update 또는 Neural compute -> optimizer step을 조합할 수 있다.
-이번 단계에서는 Learner와 Runner를 구현하지 않는다.
+Neural Learner 책임이다. 현재 TabularQLearner의 진입점은 `learn(batch)`이며
+Bootstrap -> target -> Tabular update를 조합한다. 향후 Neural Learner는
+prediction -> target -> Neural compute -> optimizer step을 조합한다. Runner는 아직 구현하지 않는다.
 
 SARSA의 실제 next_action은 현재 Transition에 없다. 수집 경계에서 선택한 다음
 행동을 Learner에 별도로 전달하는 계약이 필요하다. 무작위 Replay의 이웃 행이나 현재
@@ -402,7 +402,108 @@ metadata 계약을 설계한다. 반환 error는 Neural step 전, Tabular 각 �
 갱신 후 잔차가 필요하면 Learner가 재평가한다. Dyna는 실제·가상 전이에 같은 Rule을
 사용할 수 있으며 WorldModel, planning queue와 predecessor 관계는 별도 책임이다.
 
-## Learner 구현 전에 남은 결정 사항
+## TabularQLearner와 FrozenLake 검증
+
+`learner/tabular_q.py`의 TabularQLearner는 기존 컴포넌트를 조합하는 일반 Python 객체다.
+BaseLearner를 추가하지 않고 Optimizer, Target Network 또는 Buffer를 소유하지 않는다.
+
+| API / 입력 | 계약 |
+|---|---|
+| `TabularQLearner(model, target_generator, update_rule)` | TabularQEstimator Model + TD0TargetGenerator + TabularQUpdateRule |
+| `learn(batch: TransitionBatch) -> Tensor` | 외부 Batch 학습, 행 순서를 유지하는 signed TD error `(B,)` |
+| observation / next_observation / action | 정수 indices `(B,)`; 입력의 정수 dtype을 long으로 정규화 |
+| reward | floating Tensor `(B,)` |
+| terminated / truncated | 서로 독립적인 bool Tensor `(B,)` |
+| 반환 TD error | 현재 테이블의 dtype·device, graph 없음 |
+
+한 전이는 `B=1`로 전달한다. 모든 필드의 shape는 동일해야 하며 비어 있는 Batch와
+floating/bool state-action indices는 거절한다. 연속 관측이나 연속 행동을 지원하는
+Learner가 아니다. Model은 이미 table index인 관측을 Representation에서 그대로 보존해야
+하며 기본 구성은 IdentityRepresentation이다. 다른 Estimator를 연결하면 생성 시 실패한다.
+ActionSelector는 선택적으로 존재할 수 있고 learn에서는 호출하지 않는다.
+
+```text
+호출자: Environment -> Model.act -> Transition -> ReplayBuffer.add
+호출자: ReplayBuffer.sample -> TransitionBatch -> learner.learn
+Learner: Batch device/dtype 준비, state/action long 변환
+         -> no_grad에서 Model.forward(next_state)
+         -> action 축 max Q 선택
+         -> TD0TargetGenerator.generate(reward, next_value, terminated)
+         -> TabularQUpdateRule.update(q_table, states, actions, target)
+```
+
+Learner는 매 호출에서 현재 Model의 q_table을 참조한다. 따라서 생성 후 Model.to나
+double로 이동·변환한 테이블에도 대응하며, 직접 갱신한 값은 Model.state_dict에 저장된다.
+Batch.to는 floating 필드만 테이블 dtype으로 바꾸므로 입력 reward는 먼저 floating이어야
+한다. Buffer에 integer reward를 저장했다면 호출자가 reward를 floating으로 준비한다.
+Model, Estimator, InputAdapter, Buffer, TargetGenerator와 UpdateRule의 공개 API는 유지한다.
+
+Batch의 Bootstrap 평가와 target 생성은 어떤 테이블 갱신보다 먼저 완료한다.
+중복 상태-행동은 기존 UpdateRule에 의해 입력 순서대로 갱신된다. 중간 행에서 Bootstrap을
+다시 계산하지 않는다. 결과와 target에는 gradient가 없으며 Optimizer가 필요하지 않다.
+truncated=True, terminated=False인 일반적인 Time-limit은 Bootstrap을 유지한다.
+자동 reset의 실제 final observation 선택이나 에피소드 경계 추론은 호출자 책임이다.
+
+```python
+import torch
+from modular_rl.component.buffer import ReplayBuffer
+from modular_rl.component.estimator import TabularQEstimator
+from modular_rl.component.representation import IdentityRepresentation
+from modular_rl.component.target_generator import TD0TargetGenerator
+from modular_rl.component.update_rule import TabularQUpdateRule
+from modular_rl.data import Transition
+from modular_rl.learner import TabularQLearner
+from modular_rl.model import Model
+
+model = Model(IdentityRepresentation(), TabularQEstimator(3, 2))  # Selector is optional.
+model.estimator.q_table[1] = torch.tensor([10.0, 20.0])
+learner = TabularQLearner(model, TD0TargetGenerator(0.9), TabularQUpdateRule(0.5))
+replay = ReplayBuffer(1, seed=7)
+replay.add(Transition(0, 0, 1.0, 1, False, True))
+error = learner.learn(replay.sample(1))
+torch.testing.assert_close(error, torch.tensor([19.0]))
+assert model.estimator.q_table[0, 0].item() == 9.5
+```
+
+### FrozenLake 예제 실행
+
+프로젝트 루트에서 Gymnasium을 core 의존성이 아닌 `examples` extra로 설치한다. 렌더링하지 않으므로
+pygame 등의 GUI 의존성은 필요하지 않다.
+
+```bash
+python -m pip install -e ".[examples]"
+python -m examples.frozenlake_tabular_q --episodes 1000 --eval-episodes 100 --seed 7
+```
+
+`examples/frozenlake_tabular_q.py`는 명시적인 환경 루프로 모델, Learner와 외부 ReplayBuffer를
+조합한다. FrozenLake-v1의 4x4 map과 is_slippery=False를 사용한다.
+환경 설정과 종료 조건은 [Gymnasium FrozenLake 공식 문서](https://gymnasium.farama.org/main/environments/toy_text/frozen_lake/)를 참고한다.
+PyTorch 행동 RNG, Replay 전용 RNG, episode reset seed를 설정하고 epsilon을 1.0에서
+최소 0.05까지 감소시킨다. gamma=0.99, alpha=0.5, capacity=2000이며 매 step에서
+`sample(min(32, len(replay)))`를 외부에서 호출한다. 환경 reward는 float으로 변환해
+Transition에 저장한다. log_prob은 학습 행동의 값을 저장하되 Q-learning에서는 사용하지 않는다.
+
+종료 또는 truncation이면 episode를 마치며 step의 실제 next_observation을 저장한다.
+Autoreset wrapper는 사용하지 않는다. 평가에서는 deterministic=True로 Greedy 행동을 선택하고
+Buffer를 저장하거나 학습하지 않는다. 학습 전후 동일한 평가 seed를 사용하며 환경은 finally에서 닫는다.
+출력은 episode별 진행 정보, 평가 성공률·평균 길이·종료 플래그 수, Q-table 변경량과 Greedy 행동이다.
+
+검증 실행(Gymnasium 1.4.0, seed=7, 1,000 학습 episode, 100 평가 episode)에서는
+학습 전 Greedy 성공률 0%, 평균 길이 100 step에서 학습 후 성공률 100%, 평균 길이
+6 step으로 변했다. Q-table 64개 항목 중 35개가 변경됐고 최대 절대 변화량은 1.0이었다.
+이 성공률은 보고용 실험 결과이며 단위 테스트 합격 기준이 아니다. 수학적 정확성은
+결정적인 Bellman/종료/중복 target 테스트로, 실제 환경 루프는 짧은 실행·seed 재현·TimeLimit
+처리·환경 close 테스트로 검증한다. Gymnasium이 없으면 해당 smoke 테스트만 skip한다.
+
+### 향후 Neural DQN Learner와의 관계
+
+공통화할 수 있는 부분은 Batch 준비, prediction/Bootstrap/target의 역할, TargetGenerator
+주입과 signed TD error의 의미다. TabularQLearner는 테이블을 직접 갱신하고, DQN Learner는
+선택 행동의 미분 가능한 Q prediction과 TDLossUpdateRule 결과를 사용해 Optimizer를 실행한다.
+DQN의 Target Model, Double DQN의 Bootstrap 선택, Optimizer 소유권은 Neural 구현에서 결정한다.
+두 Learner가 실제로 구현된 뒤 반복이 확인된 작은 코드만 공유하며 거대한 BaseLearner는 두지 않는다.
+
+## 향후 Learner 구현 전에 남은 결정 사항
 
 - On-policy Trajectory 계약: 확정한 Replay `(B, ...)`와 별도로 `(T, B, ...)` 정렬·에피소드 경계·GAE/n-step에 필요한 정보를 결정한다.
 - Gradient 경계: 수집에는 act, 업데이트에는 forward/evaluate_q를 사용하는 범위와 Target 평가의 no_grad 정책.

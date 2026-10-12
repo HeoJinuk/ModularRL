@@ -1,6 +1,6 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, basic ReplayBuffer, TD(0) targets and TD UpdateRules**, not the entire ModularRL framework. It does not include a complete Learner, Runner, or training algorithms.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD(0) targets, TD UpdateRules and TabularQLearner**, not the entire ModularRL framework. Tabular Q-learning runs in the FrozenLake example. Runner, Agent and Neural Learners are not implemented.
 
 ## Layout
 
@@ -13,6 +13,8 @@ modular_rl/
 ├── model/
 │   ├── rl_model.py                 # Model.forward / Model.act / Model.evaluate_q
 │   └── input_adapter.py           # NumPy, Tensor, scalars → Tensor
+├── learner/
+│   └── tabular_q.py               # External replay batch → Q-learning update
 └── component/
     ├── representation/
     │   ├── base.py                # BaseRepresentation
@@ -119,6 +121,28 @@ torch.testing.assert_close(result.td_error, torch.tensor([2.0, -2.0]))
 assert result.loss.item() == 4.0 and prediction.grad is None
 result.loss.backward()  # Called by Learner, outside the UpdateRule.
 ```
+
+`TabularQLearner(model, target_generator, update_rule).learn(batch)` accepts a
+`TransitionBatch` of shape `(B,)` and returns signed TD errors in the same row
+order. Model must use TabularQEstimator and preserve table state indices through
+its Representation. ActionSelector is optional. Learner prepares device/dtype,
+selects max Q(next_state, ·), delegates target creation and applies the tabular
+update. It has no Buffer or Optimizer. Sampling and environment handling stay
+in the caller; all Batch targets are fixed before sequential updates begin.
+
+Run an explicit, seeded FrozenLake-v1 loop without a Runner or Agent:
+
+```bash
+python -m pip install -e ".[examples]"
+python -m examples.frozenlake_tabular_q --episodes 1000 --eval-episodes 100 --seed 7
+```
+
+The example uses the non-slippery 4x4 map, prints before/after greedy evaluation,
+episode boundaries and Q-table changes, and closes the environment in finally.
+It converts environment rewards to float before creating Transition while
+preserving terminated/truncated independently. Math is checked in deterministic
+unit tests; sparse-reward evaluation success is reported without a test threshold.
+FrozenLake smoke tests run when the optional Gymnasium dependency is installed.
 
 | Stage | Input | Output |
 |---|---|---|
