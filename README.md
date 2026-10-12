@@ -1,6 +1,6 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts and basic ReplayBuffer**, not the entire ModularRL framework. It does not include a complete Learner, Runner, TargetGenerator, UpdateRule, or training algorithms.
+> This is a **reference implementation of the Model layer, experience contracts, basic ReplayBuffer and TD(0) targets**, not the entire ModularRL framework. It does not include a complete Learner, Runner, UpdateRule, or training algorithms.
 
 ## Layout
 
@@ -20,6 +20,9 @@ modular_rl/
     ├── buffer/
     │   ├── base.py                # add / sample / clear / len
     │   └── replay.py              # Uniform replay with owned CPU snapshots
+    ├── target_generator/
+    │   ├── base.py                # Tensor inputs → target Tensor
+    │   └── td0.py                 # One-step TD formula; caller supplies next_value
     ├── estimator/
     │   ├── base.py                # BaseEstimator, BasePolicy/Value and compatible roles
     │   ├── actor_critic.py        # Policy + Value composition
@@ -59,6 +62,26 @@ integer state indices/actions and boolean flags intact. Learner chooses the
 training device and dtype. Ordered on-policy `(T, B, ...)` trajectories need a
 future trajectory buffer. See [Architecture](docs/ARCHITECTURE.md) for the full
 experience, bootstrap and Runner boundary contracts.
+
+`TD0TargetGenerator(gamma).generate(reward, next_value, terminated)` computes
+`reward + gamma * (1 - terminated) * next_value`. All three tensors must have
+the same shape and device; reward/next_value share a floating dtype and
+terminated is bool. Scalar `()`, replay `(B,)` and other same-shaped batches
+are supported without broadcasting. The caller chooses the bootstrap value
+for TD prediction, SARSA or Q-learning and controls `no_grad`/`detach`.
+Time-limit truncation can bootstrap; trajectory boundaries are a separate concern.
+
+```python
+import torch
+from modular_rl.component.target_generator import TD0TargetGenerator
+
+target = TD0TargetGenerator(gamma=0.9).generate(
+    reward=torch.tensor([1.0, 2.0]),
+    next_value=torch.tensor([10.0, 20.0]),
+    terminated=torch.tensor([False, True]),
+)
+torch.testing.assert_close(target, torch.tensor([10.0, 2.0]))
+```
 
 | Stage | Input | Output |
 |---|---|---|

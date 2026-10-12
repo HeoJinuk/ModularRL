@@ -1,7 +1,7 @@
 # ModularRL 아키텍처와 데이터 계약
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
-ReplayBuffer 참조 구현이다. 현재 저장소에는 Runner, Agent, Learner 전체와
+ReplayBuffer·TD(0) TargetGenerator 참조 구현이다. 현재 저장소에는 Runner, Agent, Learner 전체와
 학습 알고리즘이 포함되지 않는다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
@@ -140,8 +140,9 @@ Buffer가 observation의 정수/실수 의미를 추측해 dtype을 바꾸지 �
 학습 device·floating dtype의 선택과 이동은 호출자, 향후 Learner의 책임이다.
 `TransitionBatch.to(device, dtype=...)`는 새 Batch를 반환하고 floating 필드만
 dtype을 바꾼다. 정수 관측·행동·reward와 bool 플래그는 dtype을 유지한다. 따라서
-정수 reward를 floating target 계산에 사용할 때는 TargetGenerator/호출자가 적절한
-floating dtype을 명시한다. 정수로 저장된 연속 관측은 기존 InputAdapter의 명시적인
+정수 reward를 floating target 계산에 사용할 때는 호출자가
+`reward.to(dtype=next_value.dtype)` 등으로 floating dtype을 명시한다.
+TD0TargetGenerator는 입력 dtype을 바꾸지 않는다. 정수로 저장된 연속 관측은 기존 InputAdapter의 명시적인
 dtype 설정을 사용할 수 있다. `.to()`에서 이동이 필요 없는 Tensor는 일반 Tensor.to처럼
 원래 Batch와 storage를 공유할 수 있지만 Replay 저장소와는 독립적이다.
 
@@ -203,10 +204,64 @@ Buffer에서 target이나 mask를 계산한다는 의미가 아니며 그 규칙
 향후 Runner에 있다. Buffer는 전달된 값만 복사하며 환경 reset이나 Gymnasium info를
 해석하지 않는다. Dyna의 가상 전이도 동일한 기본 필드를 사용한다.
 
-## TargetGenerator 구현 전에 결정할 사항
+## TD(0) TargetGenerator
 
-- 알고리즘별 입력·출력: one-step V/Q target, Expected SARSA/Importance Sampling의 Policy 확률과 Behavior log_prob 사용 규칙.
-- Discount와 수치 dtype: gamma의 전달 방식, reward·target·mask를 계산할 floating dtype, Target 평가의 gradient 경계.
+`component/target_generator/base.py`의 BaseTargetGenerator는 `generate()` 하나만
+정의한다. nn.Module이 아니며 Model, Buffer, Optimizer를 소유하지 않는다.
+`td0.py`의 TD0TargetGenerator는 외부에서 계산한 Tensor를 사용해 다음 수식만 계산한다.
+
+```text
+target = reward + gamma * (1 - terminated) * next_value
+```
+
+| API / 입력 | 계약 |
+|---|---|
+| `TD0TargetGenerator(gamma)` | 실수 discount, `0 <= gamma <= 1` |
+| `generate(reward, next_value, terminated)` | 세 Tensor -> 하나의 target Tensor |
+| reward / next_value | 동일 floating dtype, 동일 shape·device |
+| terminated | bool Tensor, reward와 동일 shape·device |
+| target | 입력 shape·floating dtype·device 유지 |
+
+Scalar `()`, Replay `(B,)`, 추가 앞쪽 차원의 `(T, B)` 등 동일한 shape를 허용한다.
+`(B,)`와 `(B, 1)`처럼 Broadcast 가능한 다른 shape도 명확히 실패한다.
+NumPy 변환, Device 이동, 암묵적인 dtype 승격을 하지 않는다. 필요하면 호출자가
+Replay Batch를 이동하고 reward를 next_value와 같은 floating dtype으로 변환한다.
+
+종료된 항목의 next_value는 0으로 마스킹한 뒤 discount를 곱한다. 해당 항목의
+사용하지 않는 NaN/Inf Bootstrap Value도 target에 섞이지 않는다. terminated=True이면
+target은 reward이고, False이면 Bootstrap을 유지한다. truncated는 이 API의 입력이
+아니다. 일반적인 Time-limit에서 terminated=False이면 실제 마지막 관측으로
+계산한 next_value를 사용할 수 있다. Episode Boundary는 `terminated | truncated`이며
+Bootstrap Mask와 다르다. 이 컴포넌트는 다음 에피소드와의 연결을 추론하지 않는다.
+
+next_value 계산은 호출자(Learner/UpdateRule)의 책임이다. TD Prediction은 V(s'),
+SARSA는 외부에서 선택한 다음 행동의 Q(s', a'), Q-learning은 max_a Q(s', a)를
+전달할 수 있다. TargetGenerator는 이런 선택 규칙이나 EstimatorOutput을 알 필요가 없다.
+
+Gradient도 호출자 책임이다. generate는 입력 graph를 유지하고 reward에 대한 미분은 1,
+next_value에 대한 미분은 `gamma * (1 - terminated)`다. 표준 semi-gradient TD에서는
+호출자가 Bootstrap Model 평가를 `torch.no_grad()`로 감싸거나 next_value를 detach한다.
+이렇게 계산한 next_value와 graph 없는 reward를 전달하면 target에도 graph가 없다.
+TargetGenerator 내부에서 no_grad/detach를 적용하거나 Model을 호출하지 않는다.
+
+```python
+import torch
+from modular_rl.component.target_generator import TD0TargetGenerator
+
+reward = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+next_value = torch.tensor([10.0, 20.0, 30.0], dtype=torch.float64, requires_grad=True)
+terminated = torch.tensor([False, True, False])
+target = TD0TargetGenerator(gamma=0.9).generate(reward, next_value.detach(), terminated)
+torch.testing.assert_close(target, torch.tensor([10.0, 2.0, 30.0], dtype=torch.float64))
+assert not target.requires_grad
+```
+
+TD(n), GAE, lambda-return은 아직 구현하지 않는다. 순서가 없는 Replay 샘플로
+Trajectory 계산을 대신하지 않으며 `(T, B, ...)`의 경계·순서 계약은 별도로 설계한다.
+
+### 향후 Target 확장에서 결정할 사항
+
+- 알고리즘별 입력·출력: Expected SARSA/Importance Sampling의 Policy 확률과 Behavior log_prob 사용 규칙, Distributional target 표현.
 - 종료 정책: Time-limit 외 truncation의 의미, Bootstrap mask와 trace 경계의 분리, Runner의 실제 마지막 관측 제공 계약.
 - Trajectory 확장: `(T, B, ...)`의 정렬·에피소드 경계, GAE/n-step 계산에 필요한 순서 정보와 On-policy Buffer 계약.
 - Target Model 및 복원: 현재/Target Model 선택·갱신 책임, Buffer 내용·원형 위치·전용 RNG의 향후 checkpoint 범위.

@@ -7,7 +7,7 @@
 - 새로운 추상 계층, 불필요한 Registry 또는 GUI 코드를 도입하지 않는다.
 
 ## 현재 저장소의 범위
-- 현재는 Model 계약과 경험 데이터(Transition/TransitionBatch), 기본 ReplayBuffer의 참조 구현이다. Runner, Agent, Learner 전체, TargetGenerator, UpdateRule, WorldModel/Planner와 학습 알고리즘은 아직 포함하지 않는다.
+- 현재는 Model 계약과 경험 데이터(Transition/TransitionBatch), 기본 ReplayBuffer, TD(0) TargetGenerator의 참조 구현이다. Runner, Agent, Learner 전체, UpdateRule, WorldModel/Planner와 완전한 학습 알고리즘은 아직 포함하지 않는다.
 - 아래 Model 계약과 파일 배치는 이미 구현되어 있다. 기존 구현을 먼저 검토하고 중복 계층을 만들지 않는다.
 - 정수 입력은 기본적으로 torch.long으로 정규화한다. 정수로 저장된 연속 관측은 명시적인 InputAdapter dtype 설정을 사용한다.
 - Distributional 결과는 출력 payload에 담을 수 있으나, 해당 estimator/selector 및 학습 알고리즘이 구현된 것은 아니다.
@@ -41,6 +41,12 @@
 - `component/estimator/{base,actor_critic}.py`
 - `component/estimator/policy/`, `component/estimator/value/`
 - `component/action_selector/`
+- `component/buffer/`, `component/target_generator/{base,td0}.py`
+
+## TargetGenerator 계약
+- TD0TargetGenerator는 외부에서 계산한 reward, next_value, terminated Tensor로 target 수식만 계산한다. Model, Buffer, Optimizer를 참조하지 않는다.
+- 세 입력의 shape·device는 동일해야 한다. reward/next_value는 같은 floating dtype, terminated는 bool이며 자동 Broadcasting이나 입력 변환을 하지 않는다.
+- next_value 선택과 no_grad/detach는 호출자(Learner/UpdateRule)의 책임이다. terminated는 Bootstrap을 중단하지만 일반적인 Time-limit truncated는 Bootstrap이 가능하다. Episode Boundary와 Bootstrap Mask를 구분한다.
 
 ## 가독성과 입력 검증
 - Readability First: 공개 메서드는 수식과 알고리즘의 핵심 흐름이 쉽게 읽히도록 작성한다.
