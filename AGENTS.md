@@ -7,7 +7,7 @@
 - 새로운 추상 계층, 불필요한 Registry 또는 GUI 코드를 도입하지 않는다.
 
 ## 현재 저장소의 범위
-- 현재는 Model 계약과 경험 데이터(Transition/TransitionBatch), ReplayBuffer, TD(0) TargetGenerator, Tabular TD 갱신, Neural TD Loss, TabularQLearner와 DQNLearner의 참조 구현이다. FrozenLake에서 Tabular Q-learning, CartPole에서 기본 DQN을 실행할 수 있다. Runner, Agent, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
+- 현재는 Model 계약과 경험 데이터(Transition/TransitionBatch), ReplayBuffer, TD(0) TargetGenerator, Tabular TD 갱신, Neural TD Loss, TabularQLearner와 DQNLearner 및 Tabular DP Phase 1의 참조 구현이다. FrozenLake에서 Tabular Q-learning, CartPole에서 기본 DQN, Sutton Gridworld에서 Policy Evaluation/Iteration과 Value Iteration을 실행할 수 있다. Runner, Agent, MC/TD Prediction Learner, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
 - 아래 Model 계약과 파일 배치는 이미 구현되어 있다. 기존 구현을 먼저 검토하고 중복 계층을 만들지 않는다.
 - 정수 입력은 기본적으로 torch.long으로 정규화한다. 정수로 저장된 연속 관측은 명시적인 InputAdapter dtype 설정을 사용한다.
 - Distributional 결과는 출력 payload에 담을 수 있으나, 해당 estimator/selector 및 학습 알고리즘이 구현된 것은 아니다.
@@ -36,7 +36,7 @@
 
 ## 목표 파일 배치
 아래 경로는 Python 패키지 루트 기준이다.
-- `data/outputs.py`, `data/experience.py`, `data/updates.py`
+- `data/outputs.py`, `data/experience.py`, `data/updates.py`, `data/mdp.py`
 - `model/rl_model.py`, `model/input_adapter.py`
 - `component/representation/{base,identity,mlp}.py`
 - `component/estimator/{base,actor_critic}.py`
@@ -45,6 +45,7 @@
 - `component/buffer/`, `component/target_generator/{base,td0}.py`
 - `component/update_rule/{tabular,td_loss}.py`
 - `learner/{__init__,tabular_q,dqn}.py`
+- `dp/{__init__,algorithms}.py`, `environment/{__init__,gridworld}.py`
 
 ## TargetGenerator 계약
 - TD0TargetGenerator는 외부에서 계산한 reward, next_value, terminated Tensor로 target 수식만 계산한다. Model, Buffer, Optimizer를 참조하지 않는다.
@@ -69,6 +70,13 @@
 - 초기 복사와 이후 hard copy는 `sync_target()`으로 명시적으로 호출한다. Parameter와 nonpersistent Buffer도 복사하며 호환되지 않는 구조는 실패한다. 동기화 주기·탐색 감소·Warm-up은 예제/향후 Runner 책임이다.
 - TargetGenerator/UpdateRule의 gradient 계약과 기존 Model API는 유지한다. Optimizer checkpoint는 향후 Learner checkpoint의 책임이다. Double DQN, n-step, Gradient Clipping/AMP는 아직 구현하지 않는다.
 
+## Tabular DP 계약
+- TabularMDP는 알려진 환경의 `transitions[state][action]`에 TransitionOutcome(probability, next_state, reward, terminated)를 보존한다. 추론용 Model, 경험 Transition, 학습된 WorldModel과 역할이 다르며 확률합은 생성 시 검사한다.
+- DP는 경험을 샘플링하지 않고 전체 결과의 기대값을 계산한다. CPU NumPy float64의 V `(S,)`와 Policy `(S, A)`를 사용한다. 기존 Tensor 기반 Model/Learner에 값을 옮기는 것은 호출자의 명시적 변환 책임이다.
+- Policy Evaluation과 Value Iteration은 동기식 sweep을 사용한다. Policy Improvement는 정확히 같은 최대 Q 행동에 균등한 확률을 부여하며 Policy Iteration은 같은 정책 행렬인지 확인해 안정성을 판단한다.
+- 반복 한도는 DPResult.converged=False로 보고한다. Policy Iteration은 평가 실패 시 Improvement를 진행하지 않으며 마지막 평가 Policy와 Value를 함께 반환한다. gamma=1에서 Proper Policy를 자동으로 판별하거나 수렴을 보장하지 않는다.
+- `environment/gridworld.py`의 알려진 kernel과 상태별 Policy 확률을 향후 MC/TD Prediction 비교에 재사용한다. 이번 DP 구현은 Sampler, MC/TD Learner 또는 Dyna Planner를 포함하지 않는다.
+
 ## 가독성과 입력 검증
 - Readability First: 공개 메서드는 수식과 알고리즘의 핵심 흐름이 쉽게 읽히도록 작성한다.
 - 입력 검증은 필요한 Component의 짧은 `_validate()` 등의 메서드로 분리한다. 데이터 추출과 검증의 책임을 구분하되 메서드를 불필요하게 늘리지 않는다.
@@ -91,6 +99,7 @@
 - 예제 확인: `python -m examples.quickstart`.
 - FrozenLake 확인: examples extra 설치 후 `python -m examples.frozenlake_tabular_q`. 희소 보상 성공률을 단위 테스트 합격 조건으로 삼지 않는다.
 - CartPole 확인: `python -m examples.cartpole_dqn`. 전체 학습 성능은 예제로 보고하고 pytest에서는 결정적인 계산과 짧은 환경 Smoke Test를 검증한다.
+- Gridworld DP 확인: `python -m examples.gridworld_dp`. Gymnasium 없이 Sutton 참조 V와 Policy/Value Iteration의 최적 V를 검증한다.
 
 ## Git 작업 원칙
 - 작업 전 branch와 `git status`를 확인하고 기존 수정·미추적·stage 상태를 파악한다. 사용자의 기존 변경을 삭제하거나 덮어쓰지 않는다.

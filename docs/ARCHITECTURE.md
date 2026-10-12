@@ -1,9 +1,10 @@
 # ModularRL 아키텍처와 데이터 계약
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
-ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·DQNLearner 참조 구현이다.
-현재 Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole 예제에서 학습할 수 있다.
-Runner, Agent, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
+ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·DQNLearner와
+Tabular Dynamic Programming Phase 1 참조 구현이다. Tabular Q-learning은 FrozenLake,
+기본 DQN은 CartPole, 알려진 MDP의 DP는 Sutton Gridworld 예제에서 실행할 수 있다.
+Runner, Agent, MC/TD Prediction Learner, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
 
@@ -631,6 +632,141 @@ Double DQN의 변경 지점은 no_grad Bootstrap 선택 경로다. Online next Q
 Target next Q에서 gather해 next_value로 전달하면 된다. 기존 TargetGenerator,
 TDLossUpdateRule, 반환 계약과 Optimizer 절차는 재사용할 수 있다. 이번 구현에 조건문이나
 Double DQN 옵션을 미리 추가하지 않는다.
+
+## Tabular Dynamic Programming Phase 1
+
+DP는 알려진 유한 MDP의 모든 전이 결과를 합산해 기대값을 계산한다.
+Sutton & Barto의 [Reinforcement Learning: An Introduction, Chapter 4](https://www.incompleteideas.net/book/bookdraft2018mar21.pdf)를
+참고하며 Policy Evaluation, Policy Improvement/Iteration, Value Iteration을 구현한다.
+경험 샘플을 업데이트하는 기존 Learner 경로와 달리 Buffer, Optimizer 또는 Network가 필요하지 않다.
+DP의 알려진 환경 모델은 관측으로 Policy/Value를 추정하는 `model.Model`과 별개의 데이터다.
+학습된 WorldModel과 Dyna Planner는 이번 범위에 포함하지 않는다.
+
+### 알려진 Tabular MDP와 Policy
+
+`data/mdp.py`의 두 frozen dataclass가 kernel을 표현한다.
+
+| API / 데이터 | 계약 |
+|---|---|
+| `TransitionOutcome(probability, next_state, reward, terminated=False)` | P(s', r, terminated \| s, a)의 한 확률 사건 |
+| `TabularMDP(n_states, n_actions, transitions, terminal_states=())` | 0부터 시작하는 상태·행동 indices, 모든 상태에 공통 행동 수 |
+| `mdp.transitions[s][a]` | 하나 이상의 TransitionOutcome tuple; 결과별 확률합 1 |
+| `mdp.terminal_states` | 선택적인 terminal state index tuple |
+| Policy `policy[s, a]` | pi(a\|s); shape `(S, A)`, 비음수·유한, 각 행의 합 1 |
+| V / Q | shape `(S,)` / `(S, A)` |
+
+입력 nested list는 생성 시 tuple로 복사한다. 확률·보상은 유한 real scalar,
+next_state는 유효한 정수 index, terminated는 bool이어야 한다. 각 (s,a) 확률합은
+absolute tolerance 1e-12로 검사하며 임의로 정규화하지 않는다. 같은 다음 상태를 갖더라도
+reward나 terminated가 다른 결과를 합쳐 버리지 않는다. Gymnasium의 내부 P dict 형식에 의존하지 않는다.
+모든 상태·행동 행을 제공하며 terminal 행도 정상 확률을 갖는 placeholder를 제공한다.
+
+DP 알고리즘은 CPU NumPy float64 배열을 사용하며 입력 V·Policy를 복사한다. Policy 입력도
+float64로 준비하고 동일한 1e-12 확률합 검사를 통과해야 한다. 자동 확률 정규화와 Device 관리는
+포함하지 않는다. 결과 dataclass는 frozen이지만 배열 원소는 수정할 수 있다. 반환 배열 수정이
+입력 Policy/V나 kernel을 변경하지 않는다. 기존 Tensor 기반 Model/Estimator의 API는 유지하며
+DP 값을 옮기는 경우 호출자가 `torch.from_numpy(result.values)` 등을 명시적으로 사용한다.
+
+Terminal outcome의 보상은 포함하고 Bootstrap만 중단한다. 선언된 terminal state로 들어가는
+경우도 Bootstrap하지 않는다. 현재 상태가 terminal이면 V와 Q는 0이고 이후 보상을 누적하지 않는다.
+terminated=True인 결과가 있다는 이유로 그 출발 상태나 다음 상태 index 전체를 terminal로 추론하지 않는다.
+따라서 같은 next_state에 종료·비종료 결과가 공존하는 joint distribution도 표현할 수 있다.
+Time-limit truncation은 알려진 kernel의 자연 종료와 별개이며 Phase 1은 sampling loop를 구현하지 않는다.
+
+### Bellman Backup과 알고리즘 API
+
+공유하는 계산은 `action_values()`의 한 단계 기대 행동가치와 균등 동률 Greedy Policy다.
+
+```text
+Q_V(s,a) = sum_outcomes p(o|s,a) * [r(o) + gamma * bootstrap(o)]
+bootstrap(o) = 0                       if terminated or next_state is terminal
+               V(next_state)           otherwise
+Policy Evaluation: V_new(s) = sum_a pi(a|s) * Q_V_old(s,a)
+Value Iteration:   V_new(s) = max_a Q_V_old(s,a)
+Policy Improvement: pi_new(a|s) = I(a in argmax Q_V(s,.)) / number_of_maxima
+```
+
+| 공개 함수 | 역할 |
+|---|---|
+| `uniform_policy(mdp)` | 균등 행동 확률 `(S, A)` 생성 |
+| `action_values(mdp, values, gamma=1.0)` | 모든 joint outcome의 full expectation으로 Q `(S, A)` 계산 |
+| `policy_evaluation(mdp, policy, gamma=1.0, theta=1e-8, max_iterations=10000, *, initial_values=None)` | 고정 Policy의 V를 동기식으로 반복 평가 |
+| `policy_improvement(mdp, values, gamma=1.0)` | 정확히 동률인 최대 Q 행동에 균등 확률을 배분 |
+| `policy_iteration(mdp, gamma=1.0, theta=1e-8, max_iterations=100, *, max_evaluation_iterations=10000, initial_policy=None)` | 초기 균등 Policy 또는 외부 Policy의 평가·개선을 반복 |
+| `value_iteration(mdp, gamma=1.0, theta=1e-8, max_iterations=10000, *, initial_values=None)` | Bellman Optimality Backup 반복 후 최종 V에서 Greedy Policy 추출 |
+
+기본 방식은 동기식이다. 한 sweep에서는 이전 전체 V로 Q를 만든 뒤 V 전체를 교체한다.
+제자리 방식은 동일 sweep에서 앞서 갱신한 상태의 V를 뒤 상태가 사용할 수 있어 중간 값과
+반복 횟수가 달라진다. Phase 1에는 동기식 한 방식만 구현하며 별도 mode나 공통 Base Class는 두지 않는다.
+
+Policy Iteration은 Policy Evaluation의 계산 루프를 재사용하고 이전 V로 평가를 warm-start한다.
+개선 Policy의 상태별 확률 행렬이 현재 행렬과 같으면 stable로 판단한다. 정확한 최대 Q 동률에는
+언제나 같은 균등 확률을 만들어 Random tie-breaking으로 정책이 바뀌지 않는다. 거의 같은 Q를
+임의의 tolerance로 동률 처리하지 않는다. Terminal의 행동 확률은 placeholder이며 개선 시 균등이다.
+
+### 수렴 결과와 실패 계약
+
+평가·제어 함수는 같은 `DPResult`를 반환한다.
+
+| 필드 | 의미 |
+|---|---|
+| `values` / `policy` | owned float64 배열 `(S,)` / `(S, A)` |
+| `iterations` | 평가·Value Iteration은 sweep 수, Policy Iteration은 평가·개선 cycle 수 |
+| `evaluation_iterations` | Policy Evaluation에서 수행한 총 sweep 수; Value Iteration은 0 |
+| `delta` | 마지막 value sweep의 max abs(V_new - V_old); Policy Iteration은 마지막 평가 sweep |
+| `converged` | 평가·Value Iteration은 delta < theta, Policy Iteration은 평가 수렴과 Policy 안정성 |
+
+gamma는 [0,1], theta는 양의 유한 real, 두 반복 한도는 양의 정수다. 반복 한도 도달은
+`converged=False`와 마지막 계산값으로 보고한다. Policy Iteration은 평가가 수렴하지 않으면
+개선을 진행하지 않는다. 외부 cycle 한도에서도 아직 평가하지 않은 개선 Policy를 반환하지 않고,
+마지막으로 평가한 Policy와 그 V를 함께 반환한다. 비수렴 Value Iteration의 Policy는 마지막
+근사 V에 대한 Greedy Policy이며 최적이라고 주장하지 않는다. 수치 범위를 넘겨 Backup이
+비유한 값이 되면 FloatingPointError로 실패한다.
+
+gamma=1인 Episodic MDP를 지원하지만 Proper Policy를 자동 탐지하지 않는다. 종료되지 않는
+reward=1 self-loop는 반복마다 V가 커져 한도에 도달한다. 반대로 delta 수렴 자체가 모든
+정책의 종료를 증명하는 것은 아니다. delta는 update 변화량으로, 참조 V와의 절대 오차가 아니다.
+
+### Sutton Gridworld 예제와 MC/TD 재사용
+
+`environment/gridworld.py`의 `sutton_gridworld()`는 16 states, terminals=(0,15),
+actions=(up,down,left,right)의 알려진 kernel을 반환한다. 경계 밖 이동은 제자리이며 모든
+nonterminal 행동의 reward는 -1이고 terminal에 들어가는 이동도 -1이다. Terminal 행의
+zero-reward self-loop는 추가 환경 step이 아닌 placeholder다. 교재의 두 terminal 구석을
+요청에 맞춰 서로 다른 0/15 index로 표현한다.
+
+```python
+import numpy as np
+from modular_rl.dp import policy_evaluation, policy_iteration, uniform_policy, value_iteration
+from modular_rl.environment import sutton_gridworld
+
+mdp = sutton_gridworld()
+policy = uniform_policy(mdp)
+evaluation = policy_evaluation(mdp, policy, gamma=1, theta=1e-10)
+optimal_pi = policy_iteration(mdp, gamma=1, theta=1e-10)
+optimal_vi = value_iteration(mdp, gamma=1, theta=1e-10)
+assert evaluation.converged and optimal_pi.converged and optimal_vi.converged
+np.testing.assert_array_equal(optimal_pi.values, optimal_vi.values)
+print(evaluation.values.reshape(4, 4))
+```
+
+```bash
+python -m examples.gridworld_dp
+```
+
+예제는 Uniform Random Policy의 V, 두 최적 V, 선택 가능한 모든 최적 행동, 수렴 여부·반복 수와
+Sutton 참조값 최대 오차를 출력한다. theta=1e-10, gamma=1에서 평가 426 sweep,
+참조 오차 1.735e-9였다. Policy Iteration은 3 cycle·431 평가 sweep,
+Value Iteration은 4 sweep이며 두 최적 V의 참조 오차와 상호 차이는 모두 0이었다.
+테스트는 최적 Policy 배열 하나를 정답으로 고정하지 않고 선택 행동이 최대 Q를 갖는지 확인한다.
+
+향후 MC/TD Prediction은 같은 `mdp.transitions[s][a]`와 `policy[s]`로 실제 전이를
+샘플링하되 수집 루프·RNG·에피소드 종료는 별도로 설계한다. DP의 `policy_evaluation`을
+고정 Policy의 V_pi 참조값으로 사용하고 같은 kernel, reward, gamma, 초기 상태 분포와
+terminal 규칙을 맞춰 오차를 비교한다. TD Prediction에는 기존 TabularVEstimator,
+TD0TargetGenerator, TabularVUpdateRule을 재사용할 수 있다. 현재 Q-learning Learner의
+max Q Bootstrap은 고정 Policy의 V_pi 평가와 목적이 다르므로 이를 대신하지 않는다.
+이번 Phase 1에서는 환경 Sampler, MC/TD Learner 또는 Dyna용 인터페이스를 추가하지 않는다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 

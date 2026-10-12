@@ -1,6 +1,6 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD(0) targets, TD UpdateRules, TabularQLearner and DQNLearner**, not the entire ModularRL framework. Tabular Q-learning runs on FrozenLake and basic DQN on CartPole. Runner, Agent and other Neural Learners are not implemented.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD(0) targets, TD UpdateRules, TabularQLearner, DQNLearner and tabular DP**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN and Sutton Gridworld dynamic programming. Runner, Agent, MC/TD prediction learners and other Neural Learners are not implemented.
 
 ## Layout
 
@@ -9,13 +9,18 @@ modular_rl/
 ├── data/
 │   ├── outputs.py                  # ValueOutput / EstimatorOutput / ActionOutput
 │   ├── experience.py               # Transition / TransitionBatch
-│   └── updates.py                  # TDLossOutput
+│   ├── updates.py                  # TDLossOutput
+│   └── mdp.py                      # TabularMDP / joint TransitionOutcome atoms
 ├── model/
 │   ├── rl_model.py                 # Model.forward / Model.act / Model.evaluate_q
 │   └── input_adapter.py           # NumPy, Tensor, scalars → Tensor
 ├── learner/
 │   ├── tabular_q.py               # External replay batch → Q-learning update
 │   └── dqn.py                     # Online gather → target bootstrap → optimizer step
+├── dp/
+│   └── algorithms.py              # Policy evaluation/improvement/iteration, value iteration
+├── environment/
+│   └── gridworld.py               # Reusable Sutton 4x4 known transition kernel
 └── component/
     ├── representation/
     │   ├── base.py                # BaseRepresentation
@@ -362,6 +367,38 @@ policy's probabilities, including epsilon exploration; it is not changed
 by a previous deterministic call. Actions and log probabilities have shape
 `(...)` (scalar tensors for a single observation). `probabilities()` is not
 required by `BaseActionSelector` or future continuous selectors.
+
+## Tabular dynamic programming
+
+DP computes full expectations from a known `TabularMDP`; it does not sample
+ReplayBuffer or use the inference `Model`. `TransitionOutcome` preserves the
+joint next-state, reward and termination distribution for every state/action.
+The algorithms use CPU NumPy float64 values `(S,)` and policy probabilities
+`(S, A)`, synchronous sweeps and uniform probability among exactly tied greedy
+actions. `DPResult` reports values, policy, convergence, iteration counts and
+the last value change. Reaching a limit returns `converged=False`; gamma=1
+does not guarantee convergence for an improper policy.
+
+```python
+from modular_rl.dp import policy_evaluation, policy_iteration, uniform_policy, value_iteration
+from modular_rl.environment import sutton_gridworld
+
+mdp = sutton_gridworld()
+evaluation = policy_evaluation(mdp, uniform_policy(mdp), gamma=1, theta=1e-10)
+policy_result = policy_iteration(mdp, gamma=1, theta=1e-10)
+value_result = value_iteration(mdp, gamma=1, theta=1e-10)
+assert evaluation.converged and policy_result.converged and value_result.converged
+print(evaluation.values.reshape(4, 4))
+```
+
+```bash
+python -m examples.gridworld_dp
+```
+
+The example prints random-policy values, both optimal value tables, all selected
+optimal actions, convergence and reference errors. Gridworld's kernel and policy
+rows can later be reused for MC/TD comparison under the same fixed policy.
+See [Architecture](docs/ARCHITECTURE.md) for APIs, terminal handling and limits.
 
 ## Examples
 
