@@ -7,7 +7,7 @@
 - 새로운 추상 계층, 불필요한 Registry 또는 GUI 코드를 도입하지 않는다.
 
 ## 현재 저장소의 범위
-- 현재는 Model 계약과 경험 데이터(Transition/TransitionBatch), ReplayBuffer, TD(0) TargetGenerator, Tabular TD 갱신, Neural TD Loss, TabularQLearner의 참조 구현이다. FrozenLake 예제에서 Tabular Q-learning을 실행할 수 있다. Runner, Agent, Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
+- 현재는 Model 계약과 경험 데이터(Transition/TransitionBatch), ReplayBuffer, TD(0) TargetGenerator, Tabular TD 갱신, Neural TD Loss, TabularQLearner와 DQNLearner의 참조 구현이다. FrozenLake에서 Tabular Q-learning, CartPole에서 기본 DQN을 실행할 수 있다. Runner, Agent, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
 - 아래 Model 계약과 파일 배치는 이미 구현되어 있다. 기존 구현을 먼저 검토하고 중복 계층을 만들지 않는다.
 - 정수 입력은 기본적으로 torch.long으로 정규화한다. 정수로 저장된 연속 관측은 명시적인 InputAdapter dtype 설정을 사용한다.
 - Distributional 결과는 출력 payload에 담을 수 있으나, 해당 estimator/selector 및 학습 알고리즘이 구현된 것은 아니다.
@@ -19,7 +19,7 @@
 - Agent = Model + Learner
 - Model = InputAdapter + Representation + Estimator + ActionSelector
 - Learner = Buffer + TargetGenerator + UpdateRule + 선택적 WorldModel/Planner
-- 위 구성은 목표 학습 시스템의 논리적 구성이다. 현재 TabularQLearner는 외부 TransitionBatch만 받아 처리하며 Buffer를 소유하거나 샘플링하지 않는다.
+- 위 구성은 목표 학습 시스템의 논리적 구성이다. 현재 두 Learner는 외부 TransitionBatch만 받아 처리하며 Buffer를 소유하거나 샘플링하지 않는다.
 
 ## 목표 Model 계약
 - InputAdapter: NumPy, PyTorch Tensor, scalar 입력을 Tensor로 변환한다. Tabular State Index의 정수 dtype을 유지한다.
@@ -44,7 +44,7 @@
 - `component/action_selector/`
 - `component/buffer/`, `component/target_generator/{base,td0}.py`
 - `component/update_rule/{tabular,td_loss}.py`
-- `learner/{__init__,tabular_q}.py`
+- `learner/{__init__,tabular_q,dqn}.py`
 
 ## TargetGenerator 계약
 - TD0TargetGenerator는 외부에서 계산한 reward, next_value, terminated Tensor로 target 수식만 계산한다. Model, Buffer, Optimizer를 참조하지 않는다.
@@ -62,6 +62,12 @@
 - 각 입력 필드는 `(B,)`다. 정수 state/action indices를 long으로 정규화하고 Batch를 현재 q_table의 device·floating dtype에 맞춘다. Representation은 table state index를 보존해야 한다.
 - no_grad에서 다음 상태 Q의 action별 최댓값과 Batch target을 먼저 계산한 뒤 기존 UpdateRule로 갱신한다. 반환 signed TD error는 행 순서를 유지하고 graph가 없다. 수식을 Learner에 중복 구현하지 않는다.
 - Buffer 저장·샘플링, 환경 종료·reset과 실제 final observation 제공은 호출자 책임이다. Tabular에는 Optimizer가 없으며 기본 FrozenLake 예제는 Gymnasium의 선택적 examples 의존성을 사용한다.
+
+## DQNLearner 계약
+- `DQNLearner(online_model, target_model, optimizer, target_generator, update_rule).learn(batch)`는 단일 Scalar Discrete Q `(B, A)`에서 선택 행동의 prediction `(B,)`을 gather하고, no_grad Target max Q로 TD0 target을 만든 뒤 기존 TDLossUpdateRule과 Optimizer를 실행한다. 반환 TDLossOutput의 signed td_error와 scalar loss는 detach된 업데이트 직전 값이다.
+- Online/Target은 같은 구조·device·floating dtype이며 Parameter와 Buffer 저장 공간을 공유하지 않는다. Optimizer는 Online Parameter만 포함한다. Target은 동결·eval로 운용하고 Online train/eval은 호출자가 설정한다.
+- 초기 복사와 이후 hard copy는 `sync_target()`으로 명시적으로 호출한다. Parameter와 nonpersistent Buffer도 복사하며 호환되지 않는 구조는 실패한다. 동기화 주기·탐색 감소·Warm-up은 예제/향후 Runner 책임이다.
+- TargetGenerator/UpdateRule의 gradient 계약과 기존 Model API는 유지한다. Optimizer checkpoint는 향후 Learner checkpoint의 책임이다. Double DQN, n-step, Gradient Clipping/AMP는 아직 구현하지 않는다.
 
 ## 가독성과 입력 검증
 - Readability First: 공개 메서드는 수식과 알고리즘의 핵심 흐름이 쉽게 읽히도록 작성한다.
@@ -84,6 +90,7 @@
 - 프로젝트 루트에서 `python -m pytest -q`로 계약 단위 테스트와 MLP 호환성 회귀 테스트를 모두 실행한다.
 - 예제 확인: `python -m examples.quickstart`.
 - FrozenLake 확인: examples extra 설치 후 `python -m examples.frozenlake_tabular_q`. 희소 보상 성공률을 단위 테스트 합격 조건으로 삼지 않는다.
+- CartPole 확인: `python -m examples.cartpole_dqn`. 전체 학습 성능은 예제로 보고하고 pytest에서는 결정적인 계산과 짧은 환경 Smoke Test를 검증한다.
 
 ## Git 작업 원칙
 - 작업 전 branch와 `git status`를 확인하고 기존 수정·미추적·stage 상태를 파악한다. 사용자의 기존 변경을 삭제하거나 덮어쓰지 않는다.

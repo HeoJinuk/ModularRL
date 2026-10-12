@@ -1,9 +1,9 @@
 # ModularRL 아키텍처와 데이터 계약
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
-ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner 참조 구현이다.
-현재 Tabular Q-learning은 FrozenLake 예제에서 학습할 수 있다.
-Runner, Agent, Neural DQN Learner, WorldModel/Planner는 아직 포함되지 않는다.
+ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·DQNLearner 참조 구현이다.
+현재 Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole 예제에서 학습할 수 있다.
+Runner, Agent, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
 
@@ -388,7 +388,7 @@ Learner가 명시적으로 선택하며 Rule은 EstimatorOutput을 해석하지 
 
 Optimizer의 zero_grad/backward/step, gradient clipping·누적, Target Model 갱신은
 Neural Learner 책임이다. 현재 TabularQLearner의 진입점은 `learn(batch)`이며
-Bootstrap -> target -> Tabular update를 조합한다. 향후 Neural Learner는
+Bootstrap -> target -> Tabular update를 조합한다. DQNLearner는
 prediction -> target -> Neural compute -> optimizer step을 조합한다. Runner는 아직 구현하지 않는다.
 
 SARSA의 실제 next_action은 현재 Transition에 없다. 수집 경계에서 선택한 다음
@@ -495,13 +495,142 @@ Buffer를 저장하거나 학습하지 않는다. 학습 전후 동일한 평가
 결정적인 Bellman/종료/중복 target 테스트로, 실제 환경 루프는 짧은 실행·seed 재현·TimeLimit
 처리·환경 close 테스트로 검증한다. Gymnasium이 없으면 해당 smoke 테스트만 skip한다.
 
-### 향후 Neural DQN Learner와의 관계
+### DQNLearner와 실제로 겹치는 코드
 
-공통화할 수 있는 부분은 Batch 준비, prediction/Bootstrap/target의 역할, TargetGenerator
-주입과 signed TD error의 의미다. TabularQLearner는 테이블을 직접 갱신하고, DQN Learner는
-선택 행동의 미분 가능한 Q prediction과 TDLossUpdateRule 결과를 사용해 Optimizer를 실행한다.
-DQN의 Target Model, Double DQN의 Bootstrap 선택, Optimizer 소유권은 Neural 구현에서 결정한다.
-두 Learner가 실제로 구현된 뒤 반복이 확인된 작은 코드만 공유하며 거대한 BaseLearner는 두지 않는다.
+두 Learner는 Batch.to로 floating dtype·device를 준비하고 이산 action을 long으로 변환한다.
+Batch의 reward/종료 shape·dtype 검사와 no_grad에서 action별 max Q -> TD0TargetGenerator를
+호출하는 흐름도 겹친다. 반면 Tabular는 정수 state indices와 테이블의 입력 순서 갱신을,
+DQN은 feature 관측과 미분 가능한 gather prediction·Optimizer·독립 Target Model을 사용한다.
+이 작은 반복을 숨기기 위해 공통 BaseLearner나 Validation Framework를 추가하지 않는다.
+
+## DQNLearner와 CartPole 검증
+
+`learner/dqn.py`의 DQNLearner는 외부 Online Model, Target Model, Optimizer,
+TD0TargetGenerator, TDLossUpdateRule을 조합하는 일반 Python 객체다. Buffer와
+ActionSelector는 학습에서 사용하지 않는다. 수집·샘플링·평가는 외부 호출자의 책임이다.
+
+| API / 입력 | 계약 |
+|---|---|
+| `DQNLearner(online_model, target_model, optimizer, target_generator, update_rule)` | 독립된 동일 구조 Model, Online 전용 Optimizer, 기존 Target/UpdateRule |
+| `learn(batch: TransitionBatch) -> TDLossOutput` | 한 번의 backward/step, 반환값은 detach된 업데이트 직전 통계 |
+| `sync_target() -> None` | 명시적인 hard copy; 초기 복사와 이후 주기는 호출자가 결정 |
+| observation / next_observation | 동일 shape `(B, *observation_shape)`; Model의 Representation 입력 계약 준수 |
+| action / reward / terminated / truncated | `(B,)`; 정수 index / floating / bool / bool |
+| Online Q / Target Q | 하나의 floating Scalar Discrete Tensor `(B, A)`; action 수 일치 |
+| prediction / target / 반환 td_error | `(B,)`; Online Model floating dtype·device |
+| 반환 loss | scalar `()`; graph 없음 |
+
+단일 경험도 `B=1`로 전달한다. 추가 Time 축 `(T, B, ...)`은 이 Learner의 Replay
+입력이 아니다. Observation feature 수는 Model이 결정한다. Batch.to는 floating 필드만
+변환하므로 정수로 저장된 연속 관측에는 명시적인 InputAdapter dtype 설정을 사용한다.
+floating/bool action index를 묵시적으로 반올림하지 않는다. 빈 Batch, 잘못된 행 shape,
+행동 범위, 누락된 Q·복수 Critic·Distributional Q는 명확하게 실패한다.
+
+```text
+호출자: Model.act -> Environment.step -> Transition -> ReplayBuffer.add/sample
+Learner: Batch를 Online device/dtype으로 준비, action long 변환
+         -> Online Model.forward(observation) -> gather Q(s,a)
+         -> no_grad: Target.eval -> forward(next_observation) -> max Q(s',·)
+         -> no_grad: TD0TargetGenerator.generate(reward, next_value, terminated)
+         -> TDLossUpdateRule.compute(prediction, target)
+         -> optimizer.zero_grad -> loss.backward -> optimizer.step
+         -> TDLossOutput(td_error.detach(), loss.detach())
+호출자: 지정 시점에 learner.sync_target()
+```
+
+TD Error는 `target - prediction`이며 반환 행 순서는 Batch와 같다. 기본 Loss는 기존
+UpdateRule의 MSE지만 SmoothL1Loss(reduction="none") 등도 그대로 주입할 수 있다.
+TargetGenerator와 TDLossUpdateRule 자체의 gradient 보존 계약은 바꾸지 않는다.
+DQNLearner가 no_grad로 Target 평가·계산을 감싸고 반환 통계만 detach한다. Online의
+Representation과 Estimator에는 gradient가 전달되고 Target에는 전달되지 않는다.
+truncated=True, terminated=False인 Time-limit에서도 Bootstrap한다. 실제 final observation과
+다음 에피소드 reset 구분은 호출자가 관리하며, Learner는 이를 추론하지 않는다.
+
+### Target Model과 Optimizer 소유권
+
+`deepcopy(online_model)` 또는 같은 구조를 별도로 구성해 Target을 전달한다. 생성 시
+모듈 경로·종류, Parameter/Buffer 이름·shape·device·dtype 및 저장 공간 독립성을 확인한다.
+동일 Parameter 객체뿐 아니라 다른 객체가 같은 Tensor storage를 참조하는 경우도 거절한다.
+Target의 기존 grad를 비우고 requires_grad=False, eval로 설정하며 각 learn에서도 eval을 유지한다.
+BatchNorm 등 평가 시 고정되어야 하는 Buffer가 학습 중 바뀌지 않도록 한다.
+Online train/eval은 호출자가 관리하고 Learner가 임의로 바꾸지 않는다.
+
+생성자는 자동 동기화하지 않는다. `sync_target()`은 호환성을 먼저 확인한 후 strict
+state_dict 복사와 Buffer 복사를 수행하며 nonpersistent Buffer도 포함한다. Target의
+저장 공간은 유지되고 Online과 alias되지 않는다. 모든 Model 상태를 복사하므로
+ActionSelector도 있다면 양쪽에 호환되는 구성을 사용한다. 초기 복사는 학습 시작 전에
+명시적으로 호출한다. 이후 환경 step 기준 주기와 시점은 예제/향후 Runner가 결정한다.
+
+Optimizer에는 Online Parameter만 넣는다. 두 Model의 device/dtype 이동을 마친 뒤
+Optimizer를 구성해야 Parameter와 Optimizer state가 맞는다. 기본 구현은 한 floating
+dtype·device를 사용하며 AMP, Gradient Clipping/Accumulation은 포함하지 않는다.
+Optimizer state는 Model.state_dict에 포함되지 않는다. 향후 Learner checkpoint는 Online
+state_dict, Target state_dict와 optimizer.state_dict를 따로 저장·복원해야 하며,
+외부 Loop의 step·epsilon schedule·동기화 시점, Replay/RNG 상태도 별도로 결정해야 한다.
+이번 작업에서는 checkpoint wrapper나 새 공개 메서드를 추가하지 않는다.
+
+```python
+from copy import deepcopy
+import torch
+from modular_rl.component.estimator import DiscreteQEstimator
+from modular_rl.component.representation import MLPRepresentation
+from modular_rl.component.target_generator import TD0TargetGenerator
+from modular_rl.component.update_rule import TDLossUpdateRule
+from modular_rl.data import TransitionBatch
+from modular_rl.learner import DQNLearner
+from modular_rl.model import Model
+
+representation = MLPRepresentation(4, hidden_dims=(128, 128))
+online = Model(representation, DiscreteQEstimator(128, 2))  # Selector is optional.
+target = deepcopy(online)
+optimizer = torch.optim.Adam(online.parameters(), lr=1e-4)
+learner = DQNLearner(online, target, optimizer, TD0TargetGenerator(.99), TDLossUpdateRule())
+learner.sync_target()
+batch = TransitionBatch(torch.zeros(2, 4), torch.tensor([0, 1]), torch.ones(2),
+                        torch.ones(2, 4), torch.tensor([False, True]), torch.tensor([True, False]))
+result = learner.learn(batch)
+assert result.td_error.shape == (2,) and result.loss.shape == ()
+assert not result.td_error.requires_grad and not result.loss.requires_grad
+```
+
+### CartPole 예제와 향후 Double DQN
+
+```bash
+python -m pip install -e ".[examples]"
+python -m examples.cartpole_dqn
+python -m examples.cartpole_dqn --episodes 4 --eval-episodes 2 --max-steps 5 --batch-size 2 --warmup-steps 2
+```
+
+`examples/cartpole_dqn.py`는 일반 Gymnasium CartPole-v1 환경을 사용하며 렌더링과
+Autoreset을 사용하지 않는다. 종료 조건과 기본 보상은
+[Gymnasium CartPole 공식 문서](https://gymnasium.farama.org/environments/classic_control/cart_pole/)를 따른다.
+명시적인 환경 루프에서 탐색·Warm-up·Replay Sampling·Target 동기화를 처리한다.
+기본 구성은 MLP (128, 128), capacity=10,000, batch_size=64, Adam lr=1e-4,
+gamma=.99와 SmoothL1Loss(reduction="none")다. 1,000 전이를 모은 뒤 환경 step마다
+한 번 학습한다. 250 환경 step마다 hard sync하고 epsilon은 10,000 step에
+걸쳐 1.0에서 .05로 감소한다. 기본 학습은 400 episode, 평가는 20 episode, seed=7이다.
+Network와 하이퍼파라미터는 예제 함수와 CLI에 직접 기록한다. PyTorch RNG, Replay 전용
+RNG와 episode reset seed를 설정한다. 학습 전후 동일한 별도 평가 seed로 Greedy Policy를
+평가하며 평가 중에는 학습하거나 Replay에 저장하지 않는다. 환경과 Torch thread 설정은
+finally에서 정리한다. reward, epsilon, loss, signed/absolute TD Error 통계와 평가 평균 보상을 출력한다.
+
+검증 실행(Gymnasium 1.4.0, CPU, seed=7)에서 Greedy 평균 보상은 학습 전 9.40에서
+학습 후 180.95로 증가했다. 학습은 43,998 환경 step, 42,999 Optimizer step,
+175번의 주기적 Target 복사(초기 복사 제외)였고 최종 Loss=.006164,
+평균 절대 TD Error=.074323이었다. 같은 설정의 seed=42에서는 14.10 -> 73.20이었다.
+학습률 5e-4/1e-3 등 초기 구성에서 보상 정체와 변동을 관찰해 기본값을 1e-4로 정했다.
+이는 실제 학습 결과이며 500 보상으로의 수렴이나 여러 Seed에서 같은 성능을 보장하지 않는다.
+
+전체 학습 보상은 실험 결과로 보고하고 매 pytest의 성공 임계값으로 사용하지 않는다.
+결정적 테스트는 Bellman/gather/종료 mask, Online gradient·Optimizer 호출, Target 불변성,
+모든 Buffer 동기화, 반환 detach와 Model/Optimizer state 복원을 확인한다. 짧은 실제 환경
+Smoke Test는 Warm-up·동기화 주기·실제 final observation·seed 재현성·환경 종료를 확인한다.
+Gymnasium이 없으면 환경 Smoke Test만, CUDA가 없으면 CUDA 검사만 skip한다.
+
+Double DQN의 변경 지점은 no_grad Bootstrap 선택 경로다. Online next Q의 argmax 행동을
+Target next Q에서 gather해 next_value로 전달하면 된다. 기존 TargetGenerator,
+TDLossUpdateRule, 반환 계약과 Optimizer 절차는 재사용할 수 있다. 이번 구현에 조건문이나
+Double DQN 옵션을 미리 추가하지 않는다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 

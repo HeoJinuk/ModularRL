@@ -1,6 +1,6 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD(0) targets, TD UpdateRules and TabularQLearner**, not the entire ModularRL framework. Tabular Q-learning runs in the FrozenLake example. Runner, Agent and Neural Learners are not implemented.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD(0) targets, TD UpdateRules, TabularQLearner and DQNLearner**, not the entire ModularRL framework. Tabular Q-learning runs on FrozenLake and basic DQN on CartPole. Runner, Agent and other Neural Learners are not implemented.
 
 ## Layout
 
@@ -14,7 +14,8 @@ modular_rl/
 │   ├── rl_model.py                 # Model.forward / Model.act / Model.evaluate_q
 │   └── input_adapter.py           # NumPy, Tensor, scalars → Tensor
 ├── learner/
-│   └── tabular_q.py               # External replay batch → Q-learning update
+│   ├── tabular_q.py               # External replay batch → Q-learning update
+│   └── dqn.py                     # Online gather → target bootstrap → optimizer step
 └── component/
     ├── representation/
     │   ├── base.py                # BaseRepresentation
@@ -143,6 +144,28 @@ It converts environment rewards to float before creating Transition while
 preserving terminated/truncated independently. Math is checked in deterministic
 unit tests; sparse-reward evaluation success is reported without a test threshold.
 FrozenLake smoke tests run when the optional Gymnasium dependency is installed.
+
+`DQNLearner(online_model, target_model, optimizer, target_generator, update_rule)`
+uses the same external `learn(batch)` entry point. It gathers one discrete Q
+prediction per action, builds a no-grad bootstrap with the target model, computes
+the existing TD loss and runs zero_grad/backward/step. Its `TDLossOutput` contains
+detached pre-update errors `(B,)` and a scalar loss. Optimizer parameters belong
+only to the online model; the independent target model is frozen and kept in eval
+mode. Call `sync_target()` explicitly for the initial copy and scheduled hard
+synchronization of parameters and buffers. Build/move both compatible models
+before constructing the optimizer. The learner never chooses actions or samples
+replay. See [Architecture](docs/ARCHITECTURE.md) for shape and checkpoint contracts.
+
+```bash
+python -m examples.cartpole_dqn
+# Short environment/optimizer smoke run, without a learning-performance assertion:
+python -m examples.cartpole_dqn --episodes 4 --eval-episodes 2 --max-steps 5 --batch-size 2 --warmup-steps 2
+```
+
+The explicit CartPole loop owns epsilon decay, warm-up, replay sampling and target
+synchronization. It reports episode rewards, losses, signed/absolute TD error
+statistics and greedy evaluation before/after training. Tests check deterministic
+updates and short real environment loops; full training reward is an example result.
 
 | Stage | Input | Output |
 |---|---|---|
