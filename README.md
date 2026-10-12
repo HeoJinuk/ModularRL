@@ -1,6 +1,6 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, basic ReplayBuffer and TD(0) targets**, not the entire ModularRL framework. It does not include a complete Learner, Runner, UpdateRule, or training algorithms.
+> This is a **reference implementation of the Model layer, experience contracts, basic ReplayBuffer, TD(0) targets and TD UpdateRules**, not the entire ModularRL framework. It does not include a complete Learner, Runner, or training algorithms.
 
 ## Layout
 
@@ -8,7 +8,8 @@
 modular_rl/
 ├── data/
 │   ├── outputs.py                  # ValueOutput / EstimatorOutput / ActionOutput
-│   └── experience.py               # Transition / TransitionBatch
+│   ├── experience.py               # Transition / TransitionBatch
+│   └── updates.py                  # TDLossOutput
 ├── model/
 │   ├── rl_model.py                 # Model.forward / Model.act / Model.evaluate_q
 │   └── input_adapter.py           # NumPy, Tensor, scalars → Tensor
@@ -23,6 +24,9 @@ modular_rl/
     ├── target_generator/
     │   ├── base.py                # Tensor inputs → target Tensor
     │   └── td0.py                 # One-step TD formula; caller supplies next_value
+    ├── update_rule/
+    │   ├── tabular.py             # Sequential in-place V/Q updates
+    │   └── td_loss.py             # TD error + mean neural loss; no optimizer calls
     ├── estimator/
     │   ├── base.py                # BaseEstimator, BasePolicy/Value and compatible roles
     │   ├── actor_critic.py        # Policy + Value composition
@@ -81,6 +85,39 @@ target = TD0TargetGenerator(gamma=0.9).generate(
     terminated=torch.tensor([False, True]),
 )
 torch.testing.assert_close(target, torch.tensor([10.0, 2.0]))
+```
+
+`TabularVUpdateRule(alpha).update(v_table, states, target)` and
+`TabularQUpdateRule(alpha).update(q_table, states, actions, target)` update the
+original floating table under `no_grad` and return signed errors. Indices are
+long, scalar `()` or batch `(B,)`; target matches their shape and the table's
+dtype/device. Targets are copied before writing, so table aliases remain safe.
+Duplicate indices are processed in input order with errors recomputed before
+each row update. Alpha accepts real scalars, including NumPy, in `(0, 1]`.
+
+`TDLossUpdateRule(loss_fn=None).compute(prediction, target, *, weights=None)`
+returns a frozen `TDLossOutput(td_error, loss)`. Default loss is unreduced MSE;
+an injected callable must return a floating loss Tensor of the input shape.
+Optional weights are keyword-only and use `mean(weights * per_sample_loss)`
+without normalization. Inputs share shape, floating dtype and device. Graphs
+are retained; Learner controls target detachment, backward and optimizer steps.
+
+```python
+import torch
+from modular_rl.component.update_rule import TabularQUpdateRule, TDLossUpdateRule
+
+q_table = torch.zeros(1, 1)
+errors = TabularQUpdateRule(alpha=0.5).update(
+    q_table, torch.tensor([0, 0]), torch.tensor([0, 0]), torch.tensor([1.0, 3.0]),
+)
+torch.testing.assert_close(errors, torch.tensor([1.0, 2.5]))
+assert q_table.item() == 1.75
+
+prediction = torch.tensor([1.0, 3.0], requires_grad=True)
+result = TDLossUpdateRule().compute(prediction, torch.tensor([3.0, 1.0]))
+torch.testing.assert_close(result.td_error, torch.tensor([2.0, -2.0]))
+assert result.loss.item() == 4.0 and prediction.grad is None
+result.loss.backward()  # Called by Learner, outside the UpdateRule.
 ```
 
 | Stage | Input | Output |

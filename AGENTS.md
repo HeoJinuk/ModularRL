@@ -7,7 +7,7 @@
 - 새로운 추상 계층, 불필요한 Registry 또는 GUI 코드를 도입하지 않는다.
 
 ## 현재 저장소의 범위
-- 현재는 Model 계약과 경험 데이터(Transition/TransitionBatch), 기본 ReplayBuffer, TD(0) TargetGenerator의 참조 구현이다. Runner, Agent, Learner 전체, UpdateRule, WorldModel/Planner와 완전한 학습 알고리즘은 아직 포함하지 않는다.
+- 현재는 Model 계약과 경험 데이터(Transition/TransitionBatch), 기본 ReplayBuffer, TD(0) TargetGenerator, Tabular TD 갱신과 Neural TD Loss의 참조 구현이다. Runner, Agent, Learner 전체, WorldModel/Planner와 완전한 학습 알고리즘은 아직 포함하지 않는다.
 - 아래 Model 계약과 파일 배치는 이미 구현되어 있다. 기존 구현을 먼저 검토하고 중복 계층을 만들지 않는다.
 - 정수 입력은 기본적으로 torch.long으로 정규화한다. 정수로 저장된 연속 관측은 명시적인 InputAdapter dtype 설정을 사용한다.
 - Distributional 결과는 출력 payload에 담을 수 있으나, 해당 estimator/selector 및 학습 알고리즘이 구현된 것은 아니다.
@@ -35,18 +35,25 @@
 
 ## 목표 파일 배치
 아래 경로는 Python 패키지 루트 기준이다.
-- `data/outputs.py`
+- `data/outputs.py`, `data/experience.py`, `data/updates.py`
 - `model/rl_model.py`, `model/input_adapter.py`
 - `component/representation/{base,identity,mlp}.py`
 - `component/estimator/{base,actor_critic}.py`
 - `component/estimator/policy/`, `component/estimator/value/`
 - `component/action_selector/`
 - `component/buffer/`, `component/target_generator/{base,td0}.py`
+- `component/update_rule/{tabular,td_loss}.py`
 
 ## TargetGenerator 계약
 - TD0TargetGenerator는 외부에서 계산한 reward, next_value, terminated Tensor로 target 수식만 계산한다. Model, Buffer, Optimizer를 참조하지 않는다.
 - 세 입력의 shape·device는 동일해야 한다. reward/next_value는 같은 floating dtype, terminated는 bool이며 자동 Broadcasting이나 입력 변환을 하지 않는다.
-- next_value 선택과 no_grad/detach는 호출자(Learner/UpdateRule)의 책임이다. terminated는 Bootstrap을 중단하지만 일반적인 Time-limit truncated는 Bootstrap이 가능하다. Episode Boundary와 Bootstrap Mask를 구분한다.
+- next_value 선택과 no_grad/detach는 호출자(Learner)의 책임이다. terminated는 Bootstrap을 중단하지만 일반적인 Time-limit truncated는 Bootstrap이 가능하다. Episode Boundary와 Bootstrap Mask를 구분한다.
+
+## UpdateRule 계약
+- 공통 BaseUpdateRule은 두지 않는다. TabularV/QUpdateRule은 Tensor 테이블을 직접 갱신하고, TDLossUpdateRule은 외부 prediction/target의 signed TD error와 scalar loss를 계산한다.
+- TD error는 `target - current_value`다. Tabular는 no_grad에서 원본 테이블을 in-place로 입력 순서대로 갱신하며, target은 갱신 전에 복사해 고정한다. 중복 인덱스를 일괄 Advanced Indexing 연산으로 대체하지 않는다.
+- Neural은 prediction/target의 graph를 유지한다. loss_fn은 입력과 동일 shape의 미축약 loss를 반환하며, weights는 정규화 없이 샘플별 loss에 곱한 뒤 평균한다.
+- Model 호출, Bootstrap 선택, Optimizer의 zero_grad/backward/step과 Target Model 갱신은 Learner 책임이다. 로그·Priority용 TD error detach도 Learner가 수행한다.
 
 ## 가독성과 입력 검증
 - Readability First: 공개 메서드는 수식과 알고리즘의 핵심 흐름이 쉽게 읽히도록 작성한다.

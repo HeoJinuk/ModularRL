@@ -1,7 +1,8 @@
 # ModularRL 아키텍처와 데이터 계약
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
-ReplayBuffer·TD(0) TargetGenerator 참조 구현이다. 현재 저장소에는 Runner, Agent, Learner 전체와
+ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule 참조 구현이다.
+현재 저장소에는 Runner, Agent, Learner 전체와
 학습 알고리즘이 포함되지 않는다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
@@ -234,7 +235,7 @@ target은 reward이고, False이면 Bootstrap을 유지한다. truncated는 이 
 계산한 next_value를 사용할 수 있다. Episode Boundary는 `terminated | truncated`이며
 Bootstrap Mask와 다르다. 이 컴포넌트는 다음 에피소드와의 연결을 추론하지 않는다.
 
-next_value 계산은 호출자(Learner/UpdateRule)의 책임이다. TD Prediction은 V(s'),
+next_value 계산은 호출자(Learner)의 책임이다. TD Prediction은 V(s'),
 SARSA는 외부에서 선택한 다음 행동의 Q(s', a'), Q-learning은 max_a Q(s', a)를
 전달할 수 있다. TargetGenerator는 이런 선택 규칙이나 EstimatorOutput을 알 필요가 없다.
 
@@ -266,7 +267,142 @@ Trajectory 계산을 대신하지 않으며 `(T, B, ...)`의 경계·순서 계�
 - Trajectory 확장: `(T, B, ...)`의 정렬·에피소드 경계, GAE/n-step 계산에 필요한 순서 정보와 On-policy Buffer 계약.
 - Target Model 및 복원: 현재/Target Model 선택·갱신 책임, Buffer 내용·원형 위치·전용 RNG의 향후 checkpoint 범위.
 
-## Learner 구현 전에 결정할 사항
+## Tabular / Neural UpdateRule
+
+공통 BaseUpdateRule을 두지 않는다. Tabular 갱신과 Neural Loss 계산은 서로 다른
+메서드와 결과를 사용하며, Model, Estimator, Buffer, Optimizer 객체를 전달받지 않는다.
+공통 TD error 정의는 `target - current_value`다. Neural에서는 current_value가
+외부에서 전달된 prediction이고, Tabular에서는 각 행 갱신 직전의 테이블 값이다.
+
+### Tabular 직접 갱신
+
+`component/update_rule/tabular.py`의 두 Rule은 다음 계약을 따른다.
+
+| API / 입력 | 계약 |
+|---|---|
+| `TabularVUpdateRule(alpha).update(v_table, states, target)` | V[s] 직접 갱신, signed TD error Tensor 반환 |
+| `TabularQUpdateRule(alpha).update(q_table, states, actions, target)` | Q[s,a] 직접 갱신, signed TD error Tensor 반환 |
+| alpha | 양의 유한 실수, 첫 구현은 `(0, 1]`; NumPy real scalar 허용, bool/NaN/Inf 거절 |
+| v_table / q_table | floating Tensor, `(N,)` / `(N, A)` |
+| states / actions | torch.long, Scalar `()` 또는 Batch `(B,)`, 유효한 인덱스 |
+| target | 인덱스와 동일 shape, 테이블과 동일 floating dtype·device |
+| 반환 TD error | target과 동일 shape·dtype·device, graph 없음 |
+
+입력 계약을 검증한 뒤 `torch.no_grad()`에서 원본 테이블을 in-place로 갱신한다.
+테이블을 교체하거나 Estimator를 복사하지 않으므로 Model의 등록된 buffer와
+state_dict에 갱신 값이 그대로 반영된다. 원래 Tensor의 requires_grad 속성은 바꾸지 않는다.
+
+```text
+각 입력 행 i:
+    delta_i = target_i - table의 현재 값
+    table의 값 += alpha * delta_i
+```
+
+중복 상태 또는 상태-행동 쌍도 입력 순서대로 처리한다. 초기 값 0, alpha=0.5,
+target=[1,3]이면 값은 `0 -> 0.5 -> 1.75`, 반환 error는 `[1,2.5]`다.
+target 순서를 [3,1]로 바꾸면 최종 값은 1.25이고 error는 [3,-0.5]다.
+중복 인덱스에 대한 일괄 Advanced Indexing 연산, 평균 또는 합산 갱신으로 대체하지 않는다.
+
+target은 갱신 시작 시 한 번 복사해 고정한다. target이 테이블 storage를 참조해도
+내부 snapshot은 중간 갱신으로 바뀌지 않는다. 원본 target이 table view인 경우 그 view의
+값은 테이블과 함께 변하지만 갱신 계산은 복사한 값을 사용한다.
+Bootstrap을 각 행 사이에 다시 계산하지 않는다. 온라인 TD에서 매 전이마다 변경된
+테이블로 target을 만들려면 Learner가 전이별로 target 생성과 update를 호출한다.
+Replay의 무작위 행 순서는 환경의 시간 순서가 아니다.
+
+```python
+import torch
+from modular_rl.component.update_rule import TabularQUpdateRule
+
+q_table = torch.zeros(1, 1)
+td_error = TabularQUpdateRule(alpha=0.5).update(
+    q_table, torch.tensor([0, 0]), torch.tensor([0, 0]), torch.tensor([1.0, 3.0]),
+)
+torch.testing.assert_close(td_error, torch.tensor([1.0, 2.5]))
+assert q_table.item() == 1.75 and not td_error.requires_grad
+```
+
+### Neural TD Loss
+
+`component/update_rule/td_loss.py`의
+`TDLossUpdateRule(loss_fn=None).compute(prediction, target, *, weights=None)`는
+`data/updates.py`의 frozen TDLossOutput을 반환한다. 필드는 signed td_error와 scalar loss다.
+
+```text
+td_error = target - prediction
+per_sample_loss = loss_fn(prediction, target)
+loss = mean(per_sample_loss)                  # weights 없음
+loss = mean(weights * per_sample_loss)        # weights 제공
+```
+
+prediction/target은 동일 shape·floating dtype·device의 비어 있지 않은 Tensor다.
+Scalar `()`, Replay `(B,)`, 추가 앞쪽 차원도 허용하며 자동 Broadcasting은 금지한다.
+weights도 제공하면 동일 shape·dtype·device여야 한다. 기본 Loss는
+`nn.MSELoss(reduction="none")`이며 `nn.SmoothL1Loss(reduction="none")` 또는
+Callable을 주입할 수 있다. custom loss는 입력과 동일 shape의 floating Loss Tensor를
+반환해야 한다. Batch의 reduction된 scalar 등 잘못된 출력은 명확히 실패한다.
+Rule은 dtype/device를 변환하지 않으며 loss dtype은 loss_fn의 결과를 따른다.
+
+가중치는 전달된 값 그대로 사용하며 합으로 나누거나 보정·정규화하지 않는다.
+이는 향후 Importance Sampling/Prioritized Replay의 Sampler 또는 Learner 책임이다.
+td_error는 prediction의 shape·dtype·device를, loss는 scalar shape `()`를 유지한다.
+
+입력과 prediction/target의 graph를 유지한다. Optimizer, backward, 자동 detach는 없다.
+표준 semi-gradient TD에서는 Learner가 Bootstrap Model과 TargetGenerator 호출을
+no_grad로 감싸거나 target을 detach한다. 로그·Priority용 td_error의 detach도 Learner가
+수행한다. custom loss의 미분 방식은 해당 callable이 정의한다.
+
+```python
+import torch
+from modular_rl.component.update_rule import TDLossUpdateRule
+
+prediction = torch.tensor([1.0, 3.0], requires_grad=True)
+target = torch.tensor([3.0, 1.0], requires_grad=True)
+result = TDLossUpdateRule().compute(prediction, target.detach())
+torch.testing.assert_close(result.td_error, torch.tensor([2.0, -2.0]))
+assert result.loss.item() == 4.0 and prediction.grad is None
+result.loss.backward()  # Learner owns backward/step; this is outside compute().
+assert prediction.grad is not None and target.grad is None
+priority_error = result.td_error.detach().abs()
+assert not priority_error.requires_grad
+```
+
+### Learner 경계와 알고리즘 재사용
+
+Learner는 Buffer 샘플링과 Batch device/dtype을 관리하고 Model에서 prediction과
+Bootstrap 후보를 계산한다. Buffer는 정수 관측·행동 dtype을 보존하므로 Tabular update에
+전달하는 indices는 호출자가 long으로 정규화한다. 정수 reward도 호출자가 target 계산용
+floating dtype으로 변환한다. UpdateRule과 TargetGenerator는 이런 변환을 하지 않는다.
+
+| 알고리즘 | Learner가 선택하는 Bootstrap | 재사용 Rule |
+|---|---|---|
+| TD(0) Prediction | V(s') | TabularVUpdateRule 또는 Neural TDLossUpdateRule |
+| SARSA | 외부에서 선택한 다음 행동의 Q(s',a') | TabularQUpdateRule |
+| Q-learning | 현재 테이블의 max Q(s',·) | TabularQUpdateRule |
+| DQN | Target Model의 max Q(s',·) | TDLossUpdateRule |
+| Double DQN | Online Model의 argmax 행동을 Target Model에서 평가 | 같은 TDLossUpdateRule |
+
+TD0TargetGenerator는 선택된 next_value와 reward/terminated로 target만 만든다.
+DQN/Double DQN용 별도 Loss Rule은 필요하지 않다. 복수 Critic 중 어떤 Q를 쓸지도
+Learner가 명시적으로 선택하며 Rule은 EstimatorOutput을 해석하지 않는다.
+
+Optimizer의 zero_grad/backward/step, gradient clipping·누적, Target Model 갱신은
+Learner 책임이다. 첫 Learner의 최소 진입점은 `learn(batch)`로 두고, 그 내부에서
+prediction -> target -> Tabular update 또는 Neural compute -> optimizer step을 조합할 수 있다.
+이번 단계에서는 Learner와 Runner를 구현하지 않는다.
+
+SARSA의 실제 next_action은 현재 Transition에 없다. 수집 경계에서 선택한 다음
+행동을 Learner에 별도로 전달하는 계약이 필요하다. 무작위 Replay의 이웃 행이나 현재
+action을 다음 행동으로 간주하지 않는다. 일반적인 Time-limit은 Bootstrap할 수 있지만
+Episode Boundary와 Bootstrap Mask는 여전히 별개의 개념이다.
+
+Prioritized Replay는 Learner가 샘플 ID와 `abs(td_error.detach())`를 연결해 Buffer로
+전달한다. 현재 TransitionBatch에는 ID/importance weight가 없으므로 향후 별도 sampling
+metadata 계약을 설계한다. 반환 error는 Neural step 전, Tabular 각 행의 갱신 직전 값이다.
+갱신 후 잔차가 필요하면 Learner가 재평가한다. Dyna는 실제·가상 전이에 같은 Rule을
+사용할 수 있으며 WorldModel, planning queue와 predecessor 관계는 별도 책임이다.
+
+## Learner 구현 전에 남은 결정 사항
 
 - On-policy Trajectory 계약: 확정한 Replay `(B, ...)`와 별도로 `(T, B, ...)` 정렬·에피소드 경계·GAE/n-step에 필요한 정보를 결정한다.
 - Gradient 경계: 수집에는 act, 업데이트에는 forward/evaluate_q를 사용하는 범위와 Target 평가의 no_grad 정책.
