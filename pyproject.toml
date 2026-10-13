@@ -11,6 +11,7 @@ dependencies = ["numpy>=1.23", "torch>=2.0"]
 
 [project.optional-dependencies]
 examples = ["gymnasium>=1.0"]
+notebooks = ["matplotlib>=3.8", "nbformat>=5.10", "nbclient>=0.10", "ipykernel>=6.29", "jupyterlab>=4.0"]
 
 [tool.setuptools.packages.find]
 where = ["."]

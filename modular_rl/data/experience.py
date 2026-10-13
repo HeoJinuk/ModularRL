@@ -31,6 +31,27 @@ class Transition:
     truncated: bool | np.bool_ | np.ndarray | Tensor
     log_prob: ExperienceValue | None = None
 
+    def to_batch(self) -> "TransitionBatch":
+        """Snapshot this transition as a B=1 batch without changing dtypes.
+
+        Every present field is copied and detached, with one leading batch
+        axis. Tensor devices are preserved; NumPy/Python inputs become CPU
+        tensors. Learner still chooses the training device/floating dtype.
+        This conversion does not validate an algorithm's input contract.
+        """
+        values = {}
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if value is None:
+                values[field.name] = None
+                continue
+            if isinstance(value, np.ndarray):
+                tensor = torch.from_numpy(value.copy())
+            else:
+                tensor = torch.as_tensor(value).detach().clone()
+            values[field.name] = tensor.unsqueeze(0)
+        return TransitionBatch(**values)
+
 
 @dataclass(frozen=True, slots=True)
 class TransitionBatch:

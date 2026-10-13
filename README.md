@@ -24,6 +24,7 @@ modular_rl/
 │   └── algorithms.py              # Policy evaluation/improvement/iteration, value iteration
 ├── environment/
 │   ├── gridworld.py               # Reusable Sutton 4x4 known transition kernel
+│   ├── dlfs4_gridworld.py         # Book's 3x4 kernel and compact coordinate mapping
 │   └── episode_sampler.py         # External policy/outcome sampling with private RNG
 └── component/
     ├── representation/
@@ -467,6 +468,34 @@ states, episode/step checkpoints, alpha, seed and final RMSE mean/std across see
 The Python `train_and_compare()` result also exposes these checkpoints as `history`.
 Constant-alpha TD retains sampling variability; no ordering of MC/TD performance
 or monotonic RMSE is imposed by tests. DP remains pure NumPy Bellman evaluation.
+
+## Jupyter Notebooks — Deep Learning from Scratch 4
+
+Chapters 4–6 tutorials are in [notebooks/dlfs4](notebooks/dlfs4/README.md).
+They use the book's **3×4** GridWorld, separate from Sutton's 4×4 environment.
+DP, MC Prediction, TD(0) Prediction and Q-learning call ModularRL's public APIs.
+The source correspondence table explicitly lists unsupported MC Control and SARSA exercises.
+
+From the project root, install the optional stack and register/select its kernel:
+
+```bash
+conda activate modularrl-py312
+python -m pip install -e ".[notebooks,examples]"
+python -m ipykernel install --user --name modularrl-py312 --display-name "Python 3.12 (ModularRL)"
+jupyter lab notebooks/dlfs4
+```
+
+Select **Python 3.12 (ModularRL)** in each notebook, then Run All. No installation or
+sys.path discovery runs inside notebooks. `Transition.to_batch()` provides owned,
+detached B=1 tensors for `learner.learn(transition.to_batch())`, retaining dtype and
+Tensor device; the Learner still selects the training device/floating dtype.
+
+```bash
+python -m pytest -q tests/test_dlfs4_notebooks.py
+```
+
+The test runs each notebook twice in the same kernel and compares text/numeric/PNG
+outputs. Notebook dependencies are optional for the core library.
 
 ## Examples
 

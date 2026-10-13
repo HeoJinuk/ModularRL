@@ -8,21 +8,10 @@ from modular_rl.component.estimator import TabularVEstimator
 from modular_rl.component.representation import IdentityRepresentation
 from modular_rl.component.target_generator import MonteCarloReturnGenerator, TD0TargetGenerator
 from modular_rl.component.update_rule import TabularVUpdateRule
-from modular_rl.data import TransitionBatch
 from modular_rl.dp import policy_evaluation, uniform_policy
 from modular_rl.environment import TabularEpisodeSampler, sutton_gridworld
 from modular_rl.learner import MCPredictionLearner, TabularTD0PredictionLearner
 from modular_rl.model import Model
-
-
-def _transition_batch(transition):
-    """Add B=1 to an Episode's already owned scalar tensors, without shuffling."""
-    return TransitionBatch(
-        observation=transition.observation.unsqueeze(0), action=transition.action.unsqueeze(0),
-        reward=transition.reward.unsqueeze(0), next_observation=transition.next_observation.unsqueeze(0),
-        terminated=transition.terminated.unsqueeze(0), truncated=transition.truncated.unsqueeze(0),
-        log_prob=None if transition.log_prob is None else transition.log_prob.unsqueeze(0),
-    )
 
 
 def train_and_compare(episodes=5000, seed=7, alphas=(0.01, 0.05, 0.1), max_steps=10_000, log_every=1000):
@@ -76,7 +65,7 @@ def train_and_compare(episodes=5000, seed=7, alphas=(0.01, 0.05, 0.1), max_steps
         for mode in ("first", "every"):
             learners[mode].learn(episode)
         for transition in episode.transitions:
-            batch = _transition_batch(transition)
+            batch = transition.to_batch()
             for learner in td_learners.values():
                 learner.learn(batch)
         if number == episodes or (log_every and number % log_every == 0):

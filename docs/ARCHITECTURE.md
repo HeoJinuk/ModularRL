@@ -1044,6 +1044,32 @@ SARSA는 수집 시 실제 선택한 next_action을 명시적으로 전달하는
 그 후 기존 TD0TargetGenerator와 TabularQUpdateRule을 재사용할 수 있다. MC Control은
 상태-행동 Return 평균/Count와 외부 탐색 정책 개선이 필요하며 기존 V Prediction을 변경하지 않는다.
 
+## 교재 Notebook과 최소 사용성 API
+
+`notebooks/dlfs4/`는 『밑바닥부터 시작하는 딥러닝 4』 Chapter 4–6의 확인한 원본 실습을
+공개 API 호출로 표현한다. 알고리즘은 Notebook에서 재구현하지 않는다. DP의 제자리 모드,
+MC Control/Off-policy MC Control, SARSA/Off-policy SARSA는 미구현으로 명시하며
+[원본 실습 대응표](../notebooks/dlfs4/README.md)에 각 파일·설정·지원 상태·차이를 기록한다.
+
+`environment/dlfs4_gridworld.py`는 3×4 교재 환경의 알려진 TabularMDP만 만든다.
+벽 (1,1)을 제외한 11개 State ID와 좌표 tuple을 사용하며 시작은 (2,0), 목표는 (0,3)이다.
+목표 진입 +1·종료, (1,3) 진입 -1·계속, 다른 진입 0이며 벽·경계는 제자리다.
+기존 Sutton 환경과 다르다. Sampling은 기존 TabularEpisodeSampler 또는 명시적인
+결정적 환경 루프, 표시는 별도의 작은 notebooks/dlfs4/plotting.py가 담당한다.
+
+`Transition.to_batch() -> TransitionBatch`는 모든 present field를 dtype 유지·graph 없는
+복사로 만들고 앞에 B=1을 추가한다. Tensor는 원래 device를 보존하고 Python/NumPy는 CPU다.
+이산 action은 `(1,)`, 연속 action `(1,A)`, observation은 `(1,*shape)`다. log_prob=None을
+유지한다. 알고리즘 입력 검증은 Learner/Buffer의 기존 책임이며 float 강제 변환을 하지 않는다.
+기존 생성자·필드·Batch.to·Learner API를 유지하는 추가 메서드다. 기존 TD 비교 예제의
+전이별 private helper도 이 공개 변환으로 대체했다.
+
+Notebook의 기본 MC/TD는 γ=.9, 고정 시작·Uniform Policy·1,000 Episode와 동일 표본을
+사용한다. MC는 완료 Episode 전체, TD는 수집된 Episode의 시간순 B=1을 처리하며 Streaming
+Runner 구현으로 해석하지 않는다. Q-learning은 α=.8, ε=.1, 1,000 Episode와 명시적
+환경 루프를 사용한다. Kernel 실행·Matplotlib·nbformat/nbclient는 선택적 notebooks extra다.
+Run All 두 번의 실제 출력 비교는 같은 Kernel에서 수행하며 core API의 부재를 우회하지 않는다.
+
 ## 향후 Learner 구현 전에 남은 결정 사항
 
 - On-policy Trajectory 계약: 확정한 Replay `(B, ...)`와 별도로 `(T, B, ...)` 정렬·에피소드 경계·GAE/n-step에 필요한 정보를 결정한다.
