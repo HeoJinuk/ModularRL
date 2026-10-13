@@ -580,7 +580,94 @@ SARSA는 탐색을 포함한 행동 정책을 학습하므로 DP Q*를 직접 �
 06 Notebook은 기존 TD(0)/Q-learning을 보존하고 마지막에 SARSA 수치 예제·B=1 Step-by-step·
 독립 다중 Seed 비교와 Greedy/학습 성능 그림을 추가한다. 환경 실행만 Notebook에 두고
 Target/Q 갱신은 Learner의 공개 API에 맡긴다. 직접 SARSA 루프와 비교 루프의 Seed 7 Q도 일치한다.
-Off-policy SARSA, Expected SARSA, n-step은 아직 구현하지 않는다.
+Off-policy SARSA와 n-step은 아직 구현하지 않는다. Expected SARSA는 아래의 예제 조합으로 검증하며
+라이브러리 Learner는 추가하지 않는다.
+
+## Expected SARSA 컴포넌트 조합 검증
+
+`modular_rl/` 본체와 공개 API는 유지한다. `examples/gridworld_expected_sarsa.py`의 작은 함수가
+기존 컴포넌트를 직접 호출하며 새로운 Learner·TargetGenerator·Base Class를 정의하지 않는다.
+
+```python
+learn_expected_sarsa(model, batch, target_generator, update_rule, *, policy_selector) -> Tensor
+train_and_evaluate(algorithm="expected_sarsa", episodes=1000, seed=7,
+                   gamma=.9, alpha=.8, epsilon=.1, max_steps=2000, log_every=100)
+```
+
+첫 함수는 예제 API이며 signed TD Error `(B,)`를 반환한다. 기존 tabular batch 계약을 검사하고
+정수 state/action은 long, floating reward는 live Q-table의 dtype/device로 준비한다.
+`policy_selector is model.action_selector`를 요구해 실제 행동 선택과 기대값 계산의 정책을 일치시킨다.
+`train_and_evaluate`는 독립 Model과 실험 결과를 반환한다. 계산용 Learner 상태는 따로 만들지 않는다.
+
+```text
+TransitionBatch (B,) -> table dtype/device 준비
+no_grad Model.forward(next_state) -> EstimatorOutput, 단일 Q (B,A)
+동일 ActionSelector.probabilities(estimate) -> pi (B,A), RNG 소비 없음
+next_value = (pi * Q).sum(-1) -> (B,)
+TD0TargetGenerator.generate(reward, next_value, terminated) -> frozen target
+TabularQUpdateRule.update(table, states, actions, target) -> signed TD Error (B,)
+```
+
+`probabilities()`가 단일 Scalar Discrete Q를 검증한 뒤 같은 estimate의 Q를 사용한다.
+Q/확률 Shape·dtype·device가 같아야 하며 Broadcasting하지 않는다. 현재 조합은 Tabular Q와 이산
+확률 조회를 지원하는 Selector를 대상으로 한다. 모든 Selector에 probabilities를 강제하거나 연속
+정책을 이산 확률로 바꾸지 않는다. no_grad·table 직접 갱신에는 Optimizer가 없다.
+
+행동 수 A와 최대 Q 집합 M에서 기존 ε-greedy 확률은
+`pi(a|s) = epsilon/A + (1-epsilon) I(a in M)/|M|`다.
+따라서 ε=0은 max Q, ε=1은 Q 평균이다. `[0,3,3,1]`, ε=.2의 기대값은 2.75로
+동률 Greedy 질량과 탐색 질량을 모두 포함한다. `[10,2]`, ε=.2는 pi=[.9,.1], next_value=9.2다.
+현재 Q=4, r=1, gamma=.9, alpha=.5이면 Target=9.28/Error=5.28/새 Q=6.64다.
+terminated이면 Target=1/Error=-3/새 Q=2.5, truncated-only이면 Bootstrap을 유지한다.
+
+Batch의 모든 Q·pi·Target은 첫 갱신 전에 계산한다. terminal update가 다른 행의 bootstrap 상태를
+바꿔도 Target은 고정된다. 중복 쌍은 기존 Rule이 입력 순서로 갱신한다. 초기 Q=4, gamma=1,
+epsilon=0, alpha=.5, rewards=[1,3]의 중복 self-transition은 Error=[1,2.5], 최종 Q=5.75다.
+B=1의 순차 online 호출은 다음 전이에서 갱신된 Q/정책을 다시 사용한다.
+
+환경은 Gymnasium reset/step으로 즉시 학습하며 ReplayBuffer를 소유·샘플링하지 않는다.
+실제 다음 실행 행동은 Expected/Max-Q의 업데이트 후 샘플링한다. SARSA 비교는 실제 next_action을
+업데이트 전에 선택해 다음 step까지 유지한다. terminated/truncated에서 환경을 더 step하지 않고
+reset하며 실제 마지막 관측을 전달한다. 확률 조회·기대값 계산은 행동 RNG를 소비하지 않는다.
+
+### 동일 설정의 DLFS4 Gridworld 실험
+
+각 방법은 1,000 Episode, gamma=.9, alpha=.8, epsilon=.1, 시작 (2,0), 학습 cap=2,000 Step,
+평가 cap=20으로 독립 실행한다. 같은 Seed도 동일 Episode를 의미하지 않는다.
+DP 최적 경로는 5 Step, V*(start)=.6561이다. RMSE는 비종료 10개 상태의 max Q와 V* 차이다.
+Expected/SARSA의 탐색 정책 Q가 Q*를 추정한다고 가정하지 않는다.
+
+| Seed | Expected Step / Greedy / RMSE | Q-learning Step / Greedy / RMSE | SARSA Step / Greedy / RMSE |
+|---|---|---|---|
+| 7 | 53,664 / Goal 5 / .260824 | 5,738 / Goal 5 / .230544 | 8,604 / Goal 5 / .375808 |
+| 11 | 5,592 / Goal 5 / .050405 | 5,630 / Goal 5 / .069670 | 6,659 / Goal 5 / .300900 |
+| 19 | 5,621 / Goal 5 / .305310 | 5,611 / Goal 5 / .243963 | 6,627 / cutoff 20 / .255833 |
+
+Expected Seed7의 학습 cutoff는 23, 나머지 실행은 0이다. 마지막 100 Episode의 평균 Reward는
+Expected .99/.95/1.0, Q-learning 1.0/.98/1.0, SARSA 1.0/1.0/1.0이다.
+유한 표본·고정 alpha의 편차와 평가 실패를 그대로 기록하고 방법 간 성능 순위를 테스트하지 않는다.
+Q-learning/SARSA 비교의 Q와 Episode Reward/Length는 이전 예제와 동일함을 검증한다.
+
+### 실제 중복과 공통화 후보
+
+Q-learning/SARSA는 동일한 Batch 검증 본문 20줄, table dtype/device 준비, no_grad, TD0 target 호출,
+Q UpdateRule 호출을 공유한다. 차이는 next_value의 max/gather/확률 가중합이며 SARSA에는 실제
+next_action 준비와 terminal-only 처리도 있다. 예제 함수는 같은 입력 계약을 독립적으로 검사한다.
+기존 private 검증 메서드를 호출하거나 본체 리팩터링으로 새 공개 API를 만들지 않는다.
+실험 루프에도 Seed/reset/step/Transition/경계/평가/통계가 겹치지만 이번에는 재작성하지 않는다.
+
+현재 Learner는 next_value 선택이 고정돼 있어 기존 learn에 기대값 계산만 주입할 수 없다.
+TD0TargetGenerator는 이미 줄어든 `(B,)` next_value만 받으므로 Q/정책을 가져오는 새 TargetGenerator는
+필요하지 않다. 출력 계약 수준에서는 모든 계산을 재사용할 수 있고, 상위 조합 코드만 필요하다.
+향후 공통화한다면 **외부에서 갱신 전에 계산한 `next_value: Tensor (B,)`와 Batch를 받아 기존
+TargetGenerator/UpdateRule을 호출하는 작은 함수**가 최소 후보다. 기존 Learner를 유지한 채
+내부에서 재사용할 수 있지만, next_action 선택 시점·검증·dtype/device 준비·no_grad 소유권을 먼저
+결정해야 한다. 이번에는 그 인터페이스, BaseLearner 또는 별도 Bootstrap 계층을 추가하지 않는다.
+
+06 Notebook §12는 위 함수를 예제 파일에서 로드해 표시하고 수학적 계산을 다시 정의하지 않는다.
+직접 B=1 환경 수집 셀, 세 Seed 비교, Q/Greedy/DP와 학습 Reward/Length/누적 Step 그림을 추가한다.
+기존 코드 셀 13개의 소스·출력은 보존한다. 예제는 별도 학습 통계를 갖지 않으며 Q/epsilon은
+Model.state_dict에 포함된다. 학습 재개에는 gamma/alpha와 환경·PyTorch RNG도 보존해야 한다.
 
 ## DQNLearner와 CartPole 검증
 
@@ -1568,9 +1655,10 @@ seed7, 1,000 Episode·5,701 Step 이후 Greedy는 5 Step·보상 +1이었다. Q/
 두 실행에서 일치했고 기존 05의 코드 셀 21개 소스·출력은 이전 commit과 일치했다.
 SARSA는 γ=.9, α=.8, ε=.1, Seed7의 1,000 Episode/8,604 Step 이후 Greedy 5 Step/+1을 보였다.
 직접 Next Action을 재사용하는 루프와 다중 Seed 비교 루프의 Q가 일치하며 비교 결과는 위에 기록한다.
-Greedy 정책·학습 Reward/Length/Step 그림 2개를 추가해 총 22개 PNG의 두 실행 출력이 일치했다.
-기존 06의 코드 셀 9개 소스·출력도 이전 commit과 일치했다. 전체 pytest는 1,326 passed,
-29 skipped(CUDA 미지원)였다.
+Greedy 정책·학습 Reward/Length/Step 그림 2개를 추가했다. Expected SARSA는 §12의 예제 조합으로
+검증하며 추가 그림 2개를 포함해 총 24개 PNG와 텍스트·수치가 두 Run All에서 일치했다.
+기존 06의 코드 셀 13개 소스·출력·실행 번호·메타데이터도 이전 commit과 일치했다.
+최종 전체 pytest는 1,365 passed, 31 skipped(CUDA 미지원)였으며 본체 추적 파일 61개는 변경하지 않았다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 

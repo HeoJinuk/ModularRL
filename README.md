@@ -753,6 +753,48 @@ python -m pytest -q tests/test_dlfs4_notebooks.py
 The test runs each notebook twice in the same kernel and compares text/numeric/PNG
 outputs. Notebook dependencies are optional for the core library.
 
+## Expected SARSA component composition
+
+Expected SARSA runs as a small **example function**, without a new Learner or any
+changes to `modular_rl/`. It reuses the same behavior Model/Selector, tabular Q
+estimator, TransitionBatch, TD0TargetGenerator and TabularQUpdateRule:
+
+```python
+from examples.gridworld_expected_sarsa import learn_expected_sarsa
+
+td_error = learn_expected_sarsa(
+    model, transition.to_batch(), target_generator, update_rule,
+    policy_selector=model.action_selector,
+)
+```
+
+The function reads one next-state estimate, queries discrete action probabilities
+without sampling, computes `sum(pi * Q)`, then calls the existing target/update
+components. The selector must be the same object used by `model.act`. All batch
+targets are frozen before sequential table writes; termination masks bootstrap,
+while time-limit truncation uses the actual final observation.
+
+```bash
+python -m examples.gridworld_expected_sarsa --episodes 1000 --seeds 7 11 19 --gamma .9 --alpha .8 --epsilon .1
+python -m pytest -q tests/test_expected_sarsa_composition.py tests/test_gridworld_expected_sarsa.py
+```
+
+The example compares independent Expected SARSA/Q-learning/SARSA runs with equal
+settings and episode budgets, reporting episode reward/length, environment steps,
+Q tables, separate greedy evaluation and the DP optimum. For seeds 7/11/19,
+Expected SARSA reached the goal in 5 greedy steps after 1,000 episodes, using
+53,664/5,592/5,621 training steps. Seed 7 included 23 training timeouts. These are
+observed results, not performance requirements. The DP optimal path is 5 steps;
+the initial greedy policy hits the 20-step evaluation limit.
+
+Notebook 06 §12 loads this same project example function and shows the component
+flow, a direct Gymnasium online episode, numerical checks and multi-seed plots.
+The `examples` directory is project-local, not part of the installed library.
+Existing notebook code/output is preserved. Current Learners still have fixed
+max/gather bootstrap selection; the example verifies component reuse without
+introducing a shared Learner or bootstrap interface. Details and comparison
+metrics are in [ARCHITECTURE.md](docs/ARCHITECTURE.md#expected-sarsa-컴포넌트-조합-검증).
+
 ## Examples
 
 ```python

@@ -88,6 +88,7 @@ Episode를 학습하지 않고 비교를 중단한다. TD/Q는 terminated에서�
 | ch06/sarsa_off_policy.py: SarsaOffPolicyAgent | 06 §7 | 해당 Learner 없음 | 미구현 | 다음 행동·행동 확률의 수집 시점과 IS Target 보정 계약 필요 |
 | ch06/q_learning.py: QLearningAgent, π/b 분리 | 06 §8–9 | env.reset/step, Model.act, EpsilonGreedyActionSelector, TabularQLearner, TD0TargetGenerator, TabularQUpdateRule | 실행 완료 | 10,000 → 1,000 Episode; π/b dict 대신 Model/Selector; Q 네 행동 표시 |
 | ch06/q_learning_simple.py: 간소화 QLearningAgent | 06 §8–10 | 같은 Model/Learner | 실행 완료·통합 | 중복 루프 없이 두 예제의 공통 갱신 사용; stochastic 동률은 균등, deterministic은 최소 인덱스 |
+| Expected SARSA 조합 검증 확장 | 06 §12 | Model.forward, 동일 ActionSelector.probabilities, TD0TargetGenerator, TabularQUpdateRule | 실행 완료·예제 함수 | 새로운 Learner 없이 ΣπQ; 기존 코드 셀·출력 유지, 본체 API 변경 없음 |
 | common/gridworld.py: GridWorld | 세 Notebook 환경 구성 | dlfs4_gridworld, make_dlfs4_gridworld_env, TabularEnv, DLFS4_STATES/START_STATE | 실행 완료 | DP의 알려진 kernel과 Gymnasium 실행 환경 분리; compact State ID |
 | common/gridworld_render.py: Renderer | 세 Notebook 결과 표시 | plot_grid, Matplotlib | 실행 완료·간소화 | Q 삼각형 대신 행동별 heatmap; 목표 V=0과 진입 +1 구분 |
 | common/utils.py: argmax/greedy_probs/plot_total_reward | 06 §8–10 | ActionSelector.select/probabilities, plt.plot | 실행 완료·대체 | 원본 무작위 단일 argmax와 달리 동률 집합의 정확한 확률 사용 |
@@ -134,11 +135,19 @@ python -m examples.gridworld_off_policy_mc --episodes 1000 --seeds 7 11 19
 python -m examples.gridworld_off_policy_mc --episodes 100 --seeds 7 --target-uniform
 python -m examples.gridworld_off_policy_mc_control --episodes 1000 --seeds 7 11 19
 python -m examples.gridworld_sarsa --episodes 1000 --seeds 7 11 19 --alpha .8 --epsilon .1
+python -m examples.gridworld_expected_sarsa --episodes 1000 --seeds 7 11 19 --alpha .8 --epsilon .1
 ```
 
 SARSA는 설치된 ModularRL의 공개 API만 사용하며 환경 루프를 Notebook에서 직접 보여준다.
 Next Action은 학습 전에 선택해 다음 step에 유지하고, terminated에서는 None이며 truncated-only는
 final observation의 선택 행동으로 Bootstrap한다. B>1의 Frozen Target과 B=1 Online 차이는 별도로 검증한다.
+
+Expected SARSA §12는 프로젝트의 `examples/gridworld_expected_sarsa.py` 함수를 그대로 로드한다.
+examples는 설치 패키지가 아니므로 프로젝트 파일을 찾되 sys.path를 변경하지 않는다.
+핵심 함수의 소스를 표시하고, 기존 컴포넌트로 다음 상태 Q와 동일 Selector의 확률을 읽어 ΣπQ를
+TD0TargetGenerator/TabularQUpdateRule에 전달한다. 직접 reset/step B=1 수집과 공통 실험 함수 호출을
+보여주며 Notebook에서 Target/Update 계산을 다시 정의하지 않는다. 확률 조회에는 RNG 소비가 없다.
+종료 mask와 frozen Batch/중복 순서 계약은 유지한다. 새 Learner와 공통 Bootstrap 인터페이스는 추가하지 않는다.
 
 `tests/test_dlfs4_notebooks.py`는 nbformat 검증 후 각 Notebook을 같은 Kernel에서 두 번
 실행하고 텍스트·숫자·PNG 출력이 같은지 확인한다. 별도의 작은 테스트 kernelspec으로 현재
@@ -167,6 +176,7 @@ python -m pytest -q tests/test_dlfs4_notebooks.py
 | Q-learning | seed=7, 1,000 Episode, γ=.9, α=.8, ε=.1 | Truncation 0, 마지막 100 Episode 평균 보상 1.0; Greedy 5번 이동으로 목표 도달 |
 | SARSA | γ=.9, α=.8, ε=.1, Seed7, 1,000 Episode/8,604 Step | 실제 a′ 선택·재사용; Truncation 0, 마지막 100 Reward 평균 1.0, Greedy 5 Step/+1 |
 | SARSA/Q-learning 비교 | 같은 설정·독립 실행, Seed7/11/19 | SARSA Step=8,604/6,659/6,627, Greedy=5/5/20(cutoff); Q-learning Step=5,738/5,630/5,611, Greedy=5/5/5 |
+| Expected SARSA 조합 | γ=.9, α=.8, ε=.1, 1,000 Episode, Seed7/11/19 | Step=53,664/5,592/5,621; Greedy 모두 Goal 5 Step/+1; max Q의 DP RMSE=.260824/.050405/.305310 |
 
 이 수치는 해당 설정의 관측 결과다. 방문이 적은 상태·행동의 Q는 초기값으로 남을 수 있으며
 시작 경로의 성공을 모든 Q의 수렴으로 해석하지 않는다. Gymnasium 경로는 기존 Sampler의
@@ -181,13 +191,19 @@ Control 단일 표본 reward=4/b=.25는 Q=4/C=1, 두 단계 rewards=[1,3]은 Q=[
 SARSA 수치 예제의 a′=1은 Error=-1.2/Q=3.4, a′=0은 Error=6/Q=7, terminal은 Error=-3/Q=2.5다.
 직접 루프와 비교 루프의 Seed7 Q는 일치한다. 종료·Truncation·선택 횟수/실행 재사용·Batch/Online
 차이·dtype/device·Model 복원을 결정적으로 검증한다. Seed19의 Greedy cutoff도 그대로 보고한다.
-전체 pytest는 1,326 passed, 29 skipped(CUDA 미지원)다. 세 Notebook Run All 두 번의
-텍스트·수치·22개 PNG는 일치했고 기존 06 Notebook 코드 셀 9개의 소스·출력은 이전 commit과 같다.
+전체 pytest는 1,365 passed, 31 skipped(CUDA 미지원)다. 세 Notebook Run All 두 번의
+텍스트·수치·24개 PNG는 일치했고 기존 06 Notebook 코드 셀 13개의 소스·출력은 이전 commit과 같다.
 quickstart·DP/MC/TD/On/Off-policy MC·FrozenLake·CartPole Smoke Test도 통과했다.
+
+Expected SARSA 추가 실험은 학습 중 Reward/Length와 누적 Step을 기록한다. Seed7의 학습 cutoff 23회와
+큰 Step 비용, SARSA Seed19의 Greedy cutoff를 그대로 보여준다. DP 최적 경로는 5 Step이다.
+기존 Learner의 max/gather Bootstrap은 고정돼 있지만 컴포넌트의 출력 계약만으로 기대값 계산을
+조합할 수 있었다. 중복은 Batch 검증/준비와 Target/Update 호출 및 환경 루프이며, 향후 최소 공통화
+후보는 외부에서 계산한 next_value `(B,)`를 받는 작은 조합 함수다. 이번에는 그 API를 구현하지 않는다.
 
 ## 최소 확장 제안
 
 - MC Control 확장: 현재 Sample Average와 별도로 원본 고정 α 갱신·GLIE 등의 의미를 설계한다. 이번 구현에 이미 포함됐다고 간주하지 않는다.
-- SARSA 확장: 현재 On-policy TD와 구분해 Expected/Off-policy SARSA·n-step의 입력과 수식을 별도로 설계한다. 현재 Transition 필드를 임의로 추가하지 않는다.
+- SARSA 확장: Expected SARSA는 §12 예제 조합으로 검증한다. Off-policy SARSA·n-step의 입력과 수식은 별도로 설계하며 현재 Transition 필드를 임의로 추가하지 않는다.
 - Off-policy 확장: 현재 V Prediction·Weighted Q Control과 구분해 Per-decision IS 등의 계약을 별도로 설계한다. Off-policy SARSA는 아직 구현하지 않는다.
 - 제자리 DP: 필요할 때 별도 모드의 수치 의미를 설계한다. Notebook 단순화를 위해 지금 추가하지 않는다.
