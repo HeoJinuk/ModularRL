@@ -1,11 +1,11 @@
 # ModularRL 아키텍처와 데이터 계약
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
-ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·DQNLearner와
+ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·TabularSARSALearner·DQNLearner와
 Tabular DP, On/Off-policy Monte Carlo Prediction/Control 및 TD(0) Prediction 참조 구현이다.
 Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole, DP/MC/TD Prediction 비교는
 Sutton Gridworld, On/Off-policy MC Control은 교재 3×4 Gridworld에서 실행할 수 있다. Runner, Agent,
-SARSA, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
+Off-policy SARSA, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
 
@@ -394,7 +394,7 @@ Bootstrap -> target -> Tabular update를 조합한다. DQNLearner는
 prediction -> target -> Neural compute -> optimizer step을 조합한다. Runner는 아직 구현하지 않는다.
 
 SARSA의 실제 next_action은 현재 Transition에 없다. 수집 경계에서 선택한 다음
-행동을 Learner에 별도로 전달하는 계약이 필요하다. 무작위 Replay의 이웃 행이나 현재
+행동을 TabularSARSALearner.learn의 next_action 인자로 별도로 전달한다. 무작위 Replay의 이웃 행이나 현재
 action을 다음 행동으로 간주하지 않는다. 일반적인 Time-limit은 Bootstrap할 수 있지만
 Episode Boundary와 Bootstrap Mask는 여전히 별개의 개념이다.
 
@@ -504,6 +504,83 @@ Batch의 reward/종료 shape·dtype 검사와 no_grad에서 action별 max Q -> T
 호출하는 흐름도 겹친다. 반면 Tabular는 정수 state indices와 테이블의 입력 순서 갱신을,
 DQN은 feature 관측과 미분 가능한 gather prediction·Optimizer·독립 Target Model을 사용한다.
 이 작은 반복을 숨기기 위해 공통 BaseLearner나 Validation Framework를 추가하지 않는다.
+
+## Tabular SARSA와 실제 Next Action
+
+[Sutton & Barto Chapter 6](https://people.cs.umass.edu/~barto/courses/cs687/Chapter%206.pdf)의
+On-policy TD Control을 Model, TabularQEstimator, TD0TargetGenerator, TabularQUpdateRule로 구성한다.
+Q-learning의 max Q 선택을 실제 next_action의 Q gather로 바꾼 독립적인 작은 Learner다.
+기존 컴포넌트/API를 유지하고 BaseLearner나 공통 Validation Framework를 추가하지 않는다.
+
+| 공개 API / 입력 | 계약 |
+|---|---|
+| `TabularSARSALearner(model, target_generator, update_rule)` | 같은 Tabular Q Model, TD0 target, Q update rule |
+| `learn(batch, *, next_action=None) -> Tensor` | signed TD Error `(B,)`, live table floating dtype/device, graph 없음 |
+| TransitionBatch fields | 기존 tabular `(B,)`; 정수 State/Action, floating reward, bool 종료 flags |
+| next_action | `(B,)` 정수 Tensor; B=1은 정수 scalar도 허용; table device의 long으로 준비 |
+| 모든 행 terminated=True | None 허용; 다음 상태 Model 평가도 생략 |
+| 혼합 Batch | terminal 행도 유효 ID(예: 0)를 넣되 해당 Q는 TargetGenerator가 무시 |
+| truncated-only | 실제 마지막 관측의 Next Action으로 Bootstrap; 종료 환경에서 실행하지 않음 |
+
+```text
+호출자: Environment.step(action) -> nonterminal이면 Model.act(next observation)를 한 번 호출
+        -> Transition.to_batch(), 선택한 next_action을 함께 전달
+Learner: Batch를 Q dtype/device에 맞추고 인덱스 long 준비
+         -> no_grad Model.forward(next_state) -> Q(next_state, next_action) gather
+         -> 기존 TD0TargetGenerator.generate(reward, next_value, terminated)
+         -> 기존 TabularQUpdateRule.update(table, states, actions, target)
+호출자: 경계가 아니면 이미 선택한 next_action을 다음 step에서 실행
+```
+
+Learner는 행동 선택·Buffer 샘플링·환경·Optimizer를 소유하지 않는다. On-policy 수집과 정책 일관성은
+호출자 책임이며 argmax를 실제 선택 행동 대신 전달하지 않는다. 기존 Transition 필드를 바꾸지 않고
+무작위 Batch의 다음 행이나 현재 action을 a′로 추측하지 않는다. B=1 scalar를 B>1로 Broadcasting하지
+않는다. terminal placeholder도 유효 정수 범위를 검사한다. 두 종료 flag가 True이면 Bootstrap하지 않는다.
+같은 Model을 갱신하므로 이후 선택에는 새 Q가 반영되지만 이미 선택한 a′는 다시 뽑지 않는다.
+
+### Frozen Batch와 Online SARSA
+
+모든 Bootstrap Q와 Target은 table 갱신 전에 계산한다. B>1은 Frozen Target Batch Update이며
+중복 쌍은 기존 Rule의 입력 순서 계약을 따른다. 진정한 Online SARSA는 B=1을 시간순으로 호출해
+다음 전이의 Bootstrap에서 새 table을 읽는다.
+초기 Q(1,0)=4, Q(2,:)=[10,2], reward=1, gamma=.9, alpha=.5에서 a′=1은
+Target=2.8/Error=-1.2/Q(1,0)=3.4다. a′=0은 Target=10/Error=6/Q=7이다.
+terminated는 Target=1/Error=-3/Q=2.5이며 truncated-only는 Bootstrap을 유지한다.
+
+반복 쌍 s=1,a=0,s′=1,a′=0, 초기 Q=4, gamma=1, alpha=.5, reward=[1,3]이면 Frozen Batch의
+Target=[5,7], Error=[1,2.5], Q=5.75다. B=1 Online 호출은 두 번째 Target=7.5로 Q=6이 된다.
+terminal 갱신이 뒤 행의 Bootstrap 상태와 겹치는 별도 테스트도 포함한다.
+Model 저장·복원은 기존 state_dict이며 추가 영구 Learner 통계는 없다. 재개 시 gamma/alpha와
+환경·CPU/CUDA PyTorch RNG 상태도 함께 보존한다.
+
+### Gymnasium Step-by-step 비교
+
+```bash
+python -m examples.gridworld_sarsa --episodes 1000 --seeds 7 11 19 --gamma .9 --alpha .8 --epsilon .1
+```
+
+예제는 a′를 학습 전에 선택해 다음 step까지 유지한다. terminated에서는 a′를 선택하지 않고,
+truncated-only에서는 final observation의 a′를 Bootstrap에만 사용한다. 실제 TimeLimit 경계에서
+종료된 환경을 다시 step하지 않는지도 검증한다. Q-learning은 max Q Target을 만든 뒤 다음 실행
+행동을 선택한다. 두 독립 실행은 동일 예산·설정이지만 같은 Seed도 동일 Episode를 뜻하지 않는다.
+Episode별 Reward/Length, 누적 Step, Q, 별도 Greedy 평가와 DP 최적 V를 보고한다.
+
+| Seed | SARSA Step / 평가 | Q-learning Step / 평가 | max Q의 DP RMSE: SARSA / Q-learning |
+|---|---|---|---|
+| 7 | 8,604 / Goal 5 Step | 5,738 / Goal 5 Step | .375808 / .230544 |
+| 11 | 6,659 / Goal 5 Step | 5,630 / Goal 5 Step | .300900 / .069670 |
+| 19 | 6,627 / 20 Step cutoff | 5,611 / Goal 5 Step | .255833 / .243963 |
+
+각 1,000 Episode의 training cutoff는 0, 평가 cap은 20이며 초기 Greedy는 모두 cutoff였다.
+DP 최적 경로는 5 Step/V*(start)=.6561이다. RMSE는 비종료 10개 상태의 max Q와 V* 차이다.
+SARSA는 탐색을 포함한 행동 정책을 학습하므로 DP Q*를 직접 추정한다고 간주하지 않는다.
+고정 alpha=.8과 유한 표본의 Greedy 실패를 숨기거나 방법 간 순위를 테스트 조건으로 고정하지 않는다.
+성능 평가와 수학적 정확성·Next Action 선택 횟수/실행 재사용 테스트는 분리한다.
+
+06 Notebook은 기존 TD(0)/Q-learning을 보존하고 마지막에 SARSA 수치 예제·B=1 Step-by-step·
+독립 다중 Seed 비교와 Greedy/학습 성능 그림을 추가한다. 환경 실행만 Notebook에 두고
+Target/Q 갱신은 Learner의 공개 API에 맡긴다. 직접 SARSA 루프와 비교 루프의 Seed 7 Q도 일치한다.
+Off-policy SARSA, Expected SARSA, n-step은 아직 구현하지 않는다.
 
 ## DQNLearner와 CartPole 검증
 
@@ -1093,7 +1170,7 @@ Count가 충분하다는 뜻은 아니며 단일 Seed의 성공률·길이를 py
 DP 비교를 추가한다. 원본 고정 alpha=.1/10,000 Episode와 달리 Sample Average/1,000 Episode다.
 Off-policy Prediction은 아래의 기록 확률·IS 통계로 구현한다. On-policy Control은 기존 int callback과
 log_prob=None을 계속 사용할 수 있다. Off-policy Control은 아래의 별도 Weighted IS Learner를 사용한다.
-SARSA는 실제 next_action과 선택 시점, terminated/truncated의 Bootstrap 의미를 명시한 입력 계약이 필요하다.
+SARSA는 아래의 별도 Learner에 실제 next_action을 전달하며 MC Learner에 TD 수식을 혼합하지 않는다.
 
 ## Off-policy Monte Carlo Prediction
 
@@ -1447,15 +1524,15 @@ Episode 수집은 공통 collect_episode로 처리한다. 비교 예제와 MC �
 숨기지 않는다. DP Bellman 합산, MC 전체 Return 평균, TD 한 단계 Bootstrap은 별도 계산으로
 유지한다. 추가 통합 리팩터링은 현재 필요하지 않다.
 
-SARSA는 수집 시 실제 선택한 next_action을 명시적으로 전달하는 계약이 먼저 필요하다.
-그 후 기존 TD0TargetGenerator와 TabularQUpdateRule을 재사용할 수 있다. On-policy MC Control은
+SARSA는 수집 시 실제 선택한 next_action을 별도 인자로 받아 기존 TD0TargetGenerator와 TabularQUpdateRule을 재사용한다. On-policy MC Control은
 위의 별도 Q Learner로 구현했으며 기존 V Prediction을 변경하지 않는다. Off-policy V Prediction은 위의 별도 IS Learner로 구현한다.
 
 ## 교재 Notebook과 최소 사용성 API
 
 `notebooks/dlfs4/`는 『밑바닥부터 시작하는 딥러닝 4』 Chapter 4–6의 확인한 원본 실습을
 공개 API 호출로 표현한다. 알고리즘은 Notebook에서 재구현하지 않는다. DP의 제자리 모드,
-SARSA/Off-policy SARSA는 미구현으로 명시하며 Off-policy Control은 표준 Weighted IS로 구성하고
+Off-policy SARSA는 미구현으로 명시한다. SARSA는 실제 Next Action의 B=1 학습으로,
+Off-policy Control은 표준 Weighted IS로 구성하며
 [원본 실습 대응표](../notebooks/dlfs4/README.md)에 각 파일·설정·지원 상태·차이를 기록한다.
 
 `environment/dlfs4_gridworld.py`는 3×4 교재 TabularMDP와 그 Gymnasium 실행 환경 생성 함수를 제공한다.
@@ -1489,7 +1566,11 @@ Off-policy Control은 첫 Episode를 reset/step으로 직접 수집하고 나머
 seed7, 1,000 Episode·5,701 Step 이후 Greedy는 5 Step·보상 +1이었다. Q/Target·DP/C 비교와
 학습/평가 그래프 2개를 추가했다. 세 Notebook의 텍스트·수치·20개 PNG 출력이 같은 Kernel의
 두 실행에서 일치했고 기존 05의 코드 셀 21개 소스·출력은 이전 commit과 일치했다.
-전체 pytest는 1,276 passed, 27 skipped(CUDA 미지원)였다.
+SARSA는 γ=.9, α=.8, ε=.1, Seed7의 1,000 Episode/8,604 Step 이후 Greedy 5 Step/+1을 보였다.
+직접 Next Action을 재사용하는 루프와 다중 Seed 비교 루프의 Q가 일치하며 비교 결과는 위에 기록한다.
+Greedy 정책·학습 Reward/Length/Step 그림 2개를 추가해 총 22개 PNG의 두 실행 출력이 일치했다.
+기존 06의 코드 셀 9개 소스·출력도 이전 commit과 일치했다. 전체 pytest는 1,326 passed,
+29 skipped(CUDA 미지원)였다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 

@@ -1,6 +1,6 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner, Agent, SARSA and other Neural Learners are not implemented.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, TabularSARSALearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner, Agent, off-policy SARSA and other Neural Learners are not implemented.
 
 ## Layout
 
@@ -17,6 +17,7 @@ modular_rl/
 │   └── input_adapter.py           # NumPy, Tensor, scalars → Tensor
 ├── learner/
 │   ├── tabular_q.py               # External replay batch → Q-learning update
+│   ├── tabular_sarsa.py           # External batch + actual next action → SARSA update
 │   ├── dqn.py                     # Online gather → target bootstrap → optimizer step
 │   ├── mc_prediction.py           # Complete episode → first/every sample average
 │   ├── mc_control.py              # Complete episode → state-action sample averages
@@ -597,7 +598,8 @@ the three-seed RMSE mean/std was .050019/.004010 (ordinary) and .051351/.008920
 (weighted), over 137,670 steps. All RMSE excludes the goal placeholder. With pi=b,
 100 episodes gave unit weights and identical ordinary/weighted values.
 These are experiment results, without a stochastic success threshold or a required
-ranking between methods. Off-policy MC Control is a separate learner below; SARSA remains future work.
+ranking between methods. Separate learners below provide off-policy MC Control
+and on-policy SARSA. Off-policy SARSA remains future work.
 
 ## Off-policy Monte Carlo control
 
@@ -640,6 +642,54 @@ matching the DP optimal path. Max-Q RMSE across ten nonterminal states was
 .250643/.060083/.000000, so successful start-state evaluation does not imply
 all-state/action Q convergence. Exploration remains active during training.
 
+## Tabular SARSA control
+
+`TabularSARSALearner(model, target_generator, update_rule).learn(batch, next_action=...)`
+uses the existing TabularQEstimator Model, TD0TargetGenerator and TabularQUpdateRule.
+It gathers Q(next_state, actual_next_action) instead of max Q and returns detached
+signed TD errors `(B,)` on the live Q-table dtype/device. It never selects actions.
+Model, selectors and Transition/TransitionBatch fields remain unchanged.
+
+`next_action` is an integer Tensor `(B,)`; B=1 also accepts an integer scalar.
+All-terminal batches may pass None. Mixed batches use valid ignored terminal
+IDs (e.g. 0). Truncated-only transitions require a final-observation next action
+for bootstrap; both flags True disable bootstrap. Targets are frozen before
+sequential duplicate-pair updates. Online SARSA uses ordered B=1 calls.
+
+```python
+observation, _ = env.reset(seed=7)
+action = model.act(observation).action.item()
+while True:
+    next_observation, reward, terminated, truncated, _ = env.step(action)
+    next_action = None if terminated else model.act(next_observation).action.item()
+    transition = Transition(observation, action, reward, next_observation, terminated, truncated)
+    learner.learn(transition.to_batch(), next_action=next_action)
+    if terminated or truncated:
+        break
+    observation, action = next_observation, next_action
+# The caller closes the environment in a finally block.
+```
+
+Choose the next action **before** learning and execute that same action on the
+next step. At truncation it is only used for bootstrap, never executed after
+the boundary. Q(1,0)=4, Q(2,:)=[10,2], reward=1, gamma=.9, alpha=.5 gives error=-1.2
+and Q(1,0)=3.4 for next_action=1; next_action=0 gives error=6/Q=7. Termination gives
+error=-3/Q=2.5. Save the existing Model.state_dict plus gamma/alpha and collection
+RNG state to resume; the learner adds no persistent table or optimizer state.
+
+```bash
+python -m examples.gridworld_sarsa --episodes 1000 --seeds 7 11 19 --gamma .9 --alpha .8 --epsilon .1
+```
+
+The explicit Gymnasium loop compares independently trained SARSA/Q-learning
+under equal episode budgets and hyperparameters. Same seeds do not imply the
+same episodes when learned policies and action-selection timing differ.
+Seeds 7/11/19 used 8,604/6,659/6,627 SARSA steps and 5,738/5,630/5,611 Q-learning
+steps. SARSA greedy evaluation reached the goal in 5 steps for seeds 7/11;
+seed 19 hit the 20-step evaluation cap. Q-learning reached it in 5 steps for
+all three seeds, matching DP. These finite constant-alpha results are reported
+without imposing an algorithm ranking or claiming Q* convergence.
+
 ## Tabular TD(0) prediction and DP/MC comparison
 
 `TabularTD0PredictionLearner(model, target_generator, update_rule).learn(batch)`
@@ -678,9 +728,9 @@ for alpha=0.01 / 0.05 / 0.1. These are measured results, not performance thresho
 
 Chapters 4–6 tutorials are in [notebooks/dlfs4](notebooks/dlfs4/README.md).
 They use the book's **3×4** GridWorld, separate from Sutton's 4×4 environment.
-DP, on/off-policy MC Prediction, MC Control, TD(0) Prediction and Q-learning call ModularRL's public APIs.
+DP, on/off-policy MC Prediction, MC Control, TD(0) Prediction, Q-learning and SARSA call ModularRL's public APIs.
 The source correspondence table records the sample-average MC Control extension
-and records the standard weighted off-policy Control adaptation and unsupported SARSA exercises.
+and records the standard weighted off-policy Control adaptation and the step-by-step SARSA adaptation and unsupported off-policy SARSA exercises.
 
 From the project root, install the optional stack and register/select its kernel:
 

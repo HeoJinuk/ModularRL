@@ -8,7 +8,7 @@
 |---|---|
 | [04_dp_modularrl.ipynb](04_dp_modularrl.ipynb) | 두 상태 평가, GridWorld 표시, Policy Evaluation/Improvement/Iteration, Value Iteration |
 | [05_mc_modularrl.ipynb](05_mc_modularrl.ipynb) | 주사위 평균, MC Return, On/Off-policy Prediction/Control, Ordinary/Weighted IS·DP 비교 |
-| [06_td_modularrl.ipynb](06_td_modularrl.ipynb) | TD(0) Prediction, 동일 Episode MC 비교, Q-learning, Greedy 실행 |
+| [06_td_modularrl.ipynb](06_td_modularrl.ipynb) | TD(0) Prediction, 동일 Episode MC 비교, Q-learning/SARSA, 실제 Next Action·Greedy 비교 |
 
 ## 확인한 원본
 
@@ -84,7 +84,7 @@ Episode를 학습하지 않고 비교를 중단한다. TD/Q는 terminated에서�
 | Off-policy Prediction 확장: 단일 확률변수 IS에서 Episode V 추정으로 확장 | 05 §10 | ActionOutput, collect_episode, OffPolicyMCPredictionLearner, policy_evaluation | 실행 완료·추가 | γ=.9, 고정 π, 기록 log b; Ordinary/Weighted·First/Every 지원, Control과 구분 |
 | ch05/mc_control_offpolicy.py: McOffPolicyAgent | 05 §11 | OffPolicyMCControlLearner, Model.act, Episode, collect_episode | 실행 완료·표준 알고리즘 적용 | 원본 고정 α=.2 → C 기반 Weighted IS; 10,000 → 1,000 Episode; γ=.9, ε=.1 유지 |
 | ch06/td_eval.py: TdAgent | 06 §2–5 | collect_episode, TabularTD0PredictionLearner, TD0TargetGenerator, TabularVUpdateRule, Transition.to_batch | 실행 완료 | 원본 전이별 TD 유지; Gymnasium Episode는 먼저 수집 후 같은 순서 처리 |
-| ch06/sarsa.py: SarsaAgent, deque(maxlen=2) | 06 §6 | 해당 Learner 없음 | 미구현 | 실제 next_action 전달 계약 필요; max Q로 대신하지 않음 |
+| ch06/sarsa.py: SarsaAgent, deque(maxlen=2) | 06 §6·11 | TabularSARSALearner, Model.act, Transition.to_batch, TD0TargetGenerator, TabularQUpdateRule | 실행 완료 | 실제 a′를 학습 전에 선택·다음 step에 재사용; deque 대신 명시적 next_action; 10,000 → 1,000 Episode |
 | ch06/sarsa_off_policy.py: SarsaOffPolicyAgent | 06 §7 | 해당 Learner 없음 | 미구현 | 다음 행동·행동 확률의 수집 시점과 IS Target 보정 계약 필요 |
 | ch06/q_learning.py: QLearningAgent, π/b 분리 | 06 §8–9 | env.reset/step, Model.act, EpsilonGreedyActionSelector, TabularQLearner, TD0TargetGenerator, TabularQUpdateRule | 실행 완료 | 10,000 → 1,000 Episode; π/b dict 대신 Model/Selector; Q 네 행동 표시 |
 | ch06/q_learning_simple.py: 간소화 QLearningAgent | 06 §8–10 | 같은 Model/Learner | 실행 완료·통합 | 중복 루프 없이 두 예제의 공통 갱신 사용; stochastic 동률은 균등, deterministic은 최소 인덱스 |
@@ -133,7 +133,12 @@ python -m examples.gridworld_mc_control --episodes 1000 --seed 7 --epsilon 0.1
 python -m examples.gridworld_off_policy_mc --episodes 1000 --seeds 7 11 19
 python -m examples.gridworld_off_policy_mc --episodes 100 --seeds 7 --target-uniform
 python -m examples.gridworld_off_policy_mc_control --episodes 1000 --seeds 7 11 19
+python -m examples.gridworld_sarsa --episodes 1000 --seeds 7 11 19 --alpha .8 --epsilon .1
 ```
+
+SARSA는 설치된 ModularRL의 공개 API만 사용하며 환경 루프를 Notebook에서 직접 보여준다.
+Next Action은 학습 전에 선택해 다음 step에 유지하고, terminated에서는 None이며 truncated-only는
+final observation의 선택 행동으로 Bootstrap한다. B>1의 Frozen Target과 B=1 Online 차이는 별도로 검증한다.
 
 `tests/test_dlfs4_notebooks.py`는 nbformat 검증 후 각 Notebook을 같은 Kernel에서 두 번
 실행하고 텍스트·숫자·PNG 출력이 같은지 확인한다. 별도의 작은 테스트 kernelspec으로 현재
@@ -160,6 +165,8 @@ python -m pytest -q tests/test_dlfs4_notebooks.py
 | Off-policy Prediction | 각 Seed 1,000 Episode, b=균등, π=(.3,.2,.2,.3), γ=.9 | Ordinary RMSE(seed7/11/19)=.055652/.047766/.046639; Weighted=.062241/.051419/.040393 |
 | Off-policy Control | γ=.9, ε=.1, 1,000 Episode, Seed7, 5,701 Step | 초기 20 Step cutoff → 학습 후 Greedy 5 Step/+1; DP 최적 경로와 일치; max Q RMSE=.250643 |
 | Q-learning | seed=7, 1,000 Episode, γ=.9, α=.8, ε=.1 | Truncation 0, 마지막 100 Episode 평균 보상 1.0; Greedy 5번 이동으로 목표 도달 |
+| SARSA | γ=.9, α=.8, ε=.1, Seed7, 1,000 Episode/8,604 Step | 실제 a′ 선택·재사용; Truncation 0, 마지막 100 Reward 평균 1.0, Greedy 5 Step/+1 |
+| SARSA/Q-learning 비교 | 같은 설정·독립 실행, Seed7/11/19 | SARSA Step=8,604/6,659/6,627, Greedy=5/5/20(cutoff); Q-learning Step=5,738/5,630/5,611, Greedy=5/5/5 |
 
 이 수치는 해당 설정의 관측 결과다. 방문이 적은 상태·행동의 Q는 초기값으로 남을 수 있으며
 시작 경로의 성공을 모든 Q의 수렴으로 해석하지 않는다. Gymnasium 경로는 기존 Sampler의
@@ -171,13 +178,16 @@ Behavior=Target 균등 예제(seed7, 100 Episode)는 모든 Weight가 1이고 �
 비율 곱·반복 방문·Zero Weight·수치 오류·Checkpoint도 결정적 테스트로 검증한다.
 Control 단일 표본 reward=4/b=.25는 Q=4/C=1, 두 단계 rewards=[1,3]은 Q=[4,3]/C=[4,1]이다.
 갱신 후 Greedy·Early Break·동률·반복 쌍·수치 오류의 부분 갱신 방지·Checkpoint를 결정적으로 검증한다.
-전체 pytest는 1,276 passed, 27 skipped(CUDA 미지원)다. 세 Notebook Run All 두 번의
-텍스트·수치·20개 PNG는 일치했고 기존 05 Notebook 코드 셀 21개의 소스·출력은 이전 commit과 같다.
+SARSA 수치 예제의 a′=1은 Error=-1.2/Q=3.4, a′=0은 Error=6/Q=7, terminal은 Error=-3/Q=2.5다.
+직접 루프와 비교 루프의 Seed7 Q는 일치한다. 종료·Truncation·선택 횟수/실행 재사용·Batch/Online
+차이·dtype/device·Model 복원을 결정적으로 검증한다. Seed19의 Greedy cutoff도 그대로 보고한다.
+전체 pytest는 1,326 passed, 29 skipped(CUDA 미지원)다. 세 Notebook Run All 두 번의
+텍스트·수치·22개 PNG는 일치했고 기존 06 Notebook 코드 셀 9개의 소스·출력은 이전 commit과 같다.
 quickstart·DP/MC/TD/On/Off-policy MC·FrozenLake·CartPole Smoke Test도 통과했다.
 
 ## 최소 확장 제안
 
 - MC Control 확장: 현재 Sample Average와 별도로 원본 고정 α 갱신·GLIE 등의 의미를 설계한다. 이번 구현에 이미 포함됐다고 간주하지 않는다.
-- SARSA: `learn(batch, next_actions)`처럼 실제 수집한 다음 행동을 전달하고 기존 TD0TargetGenerator/TabularQUpdateRule을 재사용한다. 현재 Transition 필드를 임의로 추가하지 않는다.
-- Off-policy 확장: 현재 V Prediction·Weighted Q Control과 구분해 Per-decision IS 등의 계약을 별도로 설계한다. SARSA는 아직 구현하지 않는다.
+- SARSA 확장: 현재 On-policy TD와 구분해 Expected/Off-policy SARSA·n-step의 입력과 수식을 별도로 설계한다. 현재 Transition 필드를 임의로 추가하지 않는다.
+- Off-policy 확장: 현재 V Prediction·Weighted Q Control과 구분해 Per-decision IS 등의 계약을 별도로 설계한다. Off-policy SARSA는 아직 구현하지 않는다.
 - 제자리 DP: 필요할 때 별도 모드의 수치 의미를 설계한다. Notebook 단순화를 위해 지금 추가하지 않는다.

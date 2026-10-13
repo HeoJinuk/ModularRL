@@ -7,7 +7,7 @@
 - 새로운 추상 계층, 불필요한 Registry 또는 GUI 코드를 도입하지 않는다.
 
 ## 현재 저장소의 범위
-- 현재는 Model·경험 데이터(Transition/TransitionBatch/Episode)·ReplayBuffer·TD(0)/MC Return·Tabular TD 갱신·Neural TD Loss·TabularQLearner·DQNLearner·DP·On/Off-policy MC Prediction/Control·TD(0) Prediction의 참조 구현이다. FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD 비교와 교재 Gridworld MC Prediction/Control을 실행할 수 있다. Runner, Agent, SARSA, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
+- 현재는 Model·경험 데이터(Transition/TransitionBatch/Episode)·ReplayBuffer·TD(0)/MC Return·Tabular TD 갱신·Neural TD Loss·TabularQLearner·TabularSARSALearner·DQNLearner·DP·On/Off-policy MC Prediction/Control·TD(0) Prediction의 참조 구현이다. FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD 비교와 교재 Gridworld MC/TD Control을 실행할 수 있다. Runner, Agent, Off-policy SARSA, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
 - 아래 Model 계약과 파일 배치는 이미 구현되어 있다. 기존 구현을 먼저 검토하고 중복 계층을 만들지 않는다.
 - 정수 입력은 기본적으로 torch.long으로 정규화한다. 정수로 저장된 연속 관측은 명시적인 InputAdapter dtype 설정을 사용한다.
 - Distributional 결과는 출력 payload에 담을 수 있으나, 해당 estimator/selector 및 학습 알고리즘이 구현된 것은 아니다.
@@ -44,7 +44,7 @@
 - `component/action_selector/`
 - `component/buffer/`, `component/target_generator/{base,td0,monte_carlo}.py`
 - `component/update_rule/{tabular,td_loss}.py`
-- `learner/{__init__,tabular_q,dqn,mc_prediction,mc_control,off_policy_mc_prediction,off_policy_mc_control,tabular_td0}.py`
+- `learner/{__init__,tabular_q,tabular_sarsa,dqn,mc_prediction,mc_control,off_policy_mc_prediction,off_policy_mc_control,tabular_td0}.py`
 - `dp/{__init__,algorithms}.py`, `environment/{__init__,gridworld,dlfs4_gridworld,episode_sampler,tabular_env,episode_collection}.py`
 
 ## TargetGenerator 계약
@@ -63,6 +63,11 @@
 - 각 입력 필드는 `(B,)`다. 정수 state/action indices를 long으로 정규화하고 Batch를 현재 q_table의 device·floating dtype에 맞춘다. Representation은 table state index를 보존해야 한다.
 - no_grad에서 다음 상태 Q의 action별 최댓값과 Batch target을 먼저 계산한 뒤 기존 UpdateRule로 갱신한다. 반환 signed TD error는 행 순서를 유지하고 graph가 없다. 수식을 Learner에 중복 구현하지 않는다.
 - Buffer 저장·샘플링, 환경 종료·reset과 실제 final observation 제공은 호출자 책임이다. Tabular에는 Optimizer가 없으며 FrozenLake 예제는 필수 Gymnasium 의존성을 사용한다.
+
+## TabularSARSALearner 계약
+- TabularSARSALearner(model, target_generator, update_rule).learn(batch, next_action=...)는 동일한 TabularQEstimator/TD0TargetGenerator/TabularQUpdateRule을 재사용하고 실제 Next Action의 Q를 gather한다. 행동을 선택하거나 max Q로 대체하지 않는다.
+- next_action은 (B,) 정수 Tensor이며 B=1은 정수 scalar도 허용한다. 모두 terminal이면 None, 혼합 Batch의 terminal 행은 무시되는 유효 Action ID(예: 0)를 전달한다. truncated-only는 실제 마지막 관측의 Next Action으로 Bootstrap한다.
+- B>1은 갱신 전 Target을 고정하고 중복 쌍은 기존 Rule로 순차 갱신한다. Online SARSA는 B=1을 시간순으로 호출하며 외부에서 Next Action을 학습 전에 한 번 선택해 다음 step에서 그대로 실행한다. Truncation에서 선택한 행동은 Bootstrap에만 사용한다. Transition 필드를 추가하지 않는다.
 
 ## DQNLearner 계약
 - `DQNLearner(online_model, target_model, optimizer, target_generator, update_rule).learn(batch)`는 단일 Scalar Discrete Q `(B, A)`에서 선택 행동의 prediction `(B,)`을 gather하고, no_grad Target max Q로 TD0 target을 만든 뒤 기존 TDLossUpdateRule과 Optimizer를 실행한다. 반환 TDLossOutput의 signed td_error와 scalar loss는 detach된 업데이트 직전 값이다.
@@ -142,6 +147,8 @@
 - Off-policy MC 확인: `python -m examples.gridworld_off_policy_mc --seeds 7 11 19`. 고정 Target의 DP 참조값과 Ordinary/Weighted IS를 비교한다. `--target-uniform`으로 b=pi의 Weight=1을 확인한다.
 - Off-policy MC Control 확인: `python -m examples.gridworld_off_policy_mc_control --seeds 7 11 19`. 탐색 Behavior와 결정적 Target의 평가를 구분하고 Q/C·DP 최적 경로를 보고한다.
 - Gridworld TD 비교: `python -m examples.gridworld_td --seeds 7 11 19`. 동일 경험에서 MC 두 모드와 TD alpha=.01/.05/.1을 비교한다. Episode/step별 RMSE와 Seed별 평균·표준편차를 보고하며 특정 알고리즘의 우위를 pytest 조건으로 삼지 않는다.
+
+- SARSA 비교: `python -m examples.gridworld_sarsa --seeds 7 11 19`. 같은 예산·설정의 SARSA/Q-learning은 독립적인 실행이며 같은 Seed도 동일 경험을 뜻하지 않는다. 탐색 성능과 별도 Greedy 평가를 구분한다.
 
 ## Git 작업 원칙
 - 작업 전 branch와 `git status`를 확인하고 기존 수정·미추적·stage 상태를 파악한다. 사용자의 기존 변경을 삭제하거나 덮어쓰지 않는다.
