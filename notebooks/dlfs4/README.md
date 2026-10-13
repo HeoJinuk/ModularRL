@@ -7,7 +7,7 @@
 | Notebook | 실행 지원 |
 |---|---|
 | [04_dp_modularrl.ipynb](04_dp_modularrl.ipynb) | 두 상태 평가, GridWorld 표시, Policy Evaluation/Improvement/Iteration, Value Iteration |
-| [05_mc_modularrl.ipynb](05_mc_modularrl.ipynb) | 주사위 평균, MC Return, First/Every Prediction, DP 오차·Count·V 변화, 확률변수 IS |
+| [05_mc_modularrl.ipynb](05_mc_modularrl.ipynb) | 주사위 평균, MC Return, First/Every Prediction, On-policy MC Control·Q/정책·DP 비교, 확률변수 IS |
 | [06_td_modularrl.ipynb](06_td_modularrl.ipynb) | TD(0) Prediction, 동일 Episode MC 비교, Q-learning, Greedy 실행 |
 
 ## 확인한 원본
@@ -79,7 +79,7 @@ Episode를 학습하지 않고 비교를 중단한다. TD/Q는 terminated에서�
 | ch04/value_iter.py: value_iter_onestep/value_iter | 04 §7–8 | value_iteration | 실행 완료 | 동기식; PI와 같은 최적 V인지 확인 |
 | ch05/dice.py: sample, 표본 평균 | 05 §2 | NumPy 표본·누적 평균 | 실행 완료 | RL 갱신이 아닌 통계 실습; 중간 print 대신 그래프 |
 | ch05/mc_eval.py: RandomAgent, Every-visit V | 05 §3–7 | make_dlfs4_gridworld_env, collect_episode, Episode, MonteCarloReturnGenerator, MCPredictionLearner | 실행 완료 | Every는 유지; First·Count·DP RMSE 추가; 원본 역순 평균 갱신 → 시간순 평균 |
-| ch05/mc_control.py: McAgent, Q와 ε-greedy 개선 | 05 §8 | 해당 Learner 없음 | 미구현 | γ=.9, α=.1, ε=.1; 상태-행동 Return 갱신과 외부 정책 개선 필요 |
+| ch05/mc_control.py: McAgent, Q와 ε-greedy 개선 | 05 §8 | Model.act, EpsilonGreedyActionSelector, TabularMCControlLearner, collect_episode | 실행 완료·확장 | 원본 고정 α=.1 → First-visit Sample Average; 10,000 → 1,000 Episode; γ=.9, ε=.1 유지 |
 | ch05/importance_sampling.py: 확률변수 평균/분산 | 05 §9 | NumPy 표본·ρ=π/b | 실행 완료 | Seed 명시; 이 통계 실습을 Off-policy RL 구현으로 부르지 않음 |
 | ch05/mc_control_offpolicy.py: McOffPolicyAgent | 05 §10 | 해당 Learner 없음 | 미구현 | γ=.9, α=.2, ε=.1; Return 보정·target/behavior 계약 필요 |
 | ch06/td_eval.py: TdAgent | 06 §2–5 | collect_episode, TabularTD0PredictionLearner, TD0TargetGenerator, TabularVUpdateRule, Transition.to_batch | 실행 완료 | 원본 전이별 TD 유지; Gymnasium Episode는 먼저 수집 후 같은 순서 처리 |
@@ -104,6 +104,16 @@ MC는 `learner.learn(episode)`다. MC/TD 비교는 동일한 완료 Episode를 �
 TD는 순서대로 B=1을 처리한다. TD의 일반적 Time-limit Bootstrap과 MC의 미완성 Episode 거절은
 각 Notebook에서 구분한다. 출력과 테스트는 RMSE의 단조 감소나 MC/TD 성능 순위를 요구하지 않는다.
 
+MC Control은 `Model(IdentityRepresentation(), TabularQEstimator(...), EpsilonGreedyActionSelector(...))`와
+`TabularMCControlLearner(model, MonteCarloReturnGenerator(.9))`를 조합한다. Model.act를 callback으로
+collect_episode에 전달하고 자연 종료 후 learn한다. 수집 중에는 Q를 고정하고 다음 Episode부터
+새 Q를 사용한다. visit_counts `(S,A)`는 Model과 별도로 저장·복원한다. 평가에는 독립 환경과
+deterministic=True를 사용하며 Training Reward와 Greedy 평가의 길이·목표 도달을 구분한다.
+
+```bash
+python -m examples.gridworld_mc_control --episodes 1000 --seed 7 --epsilon 0.1
+```
+
 `tests/test_dlfs4_notebooks.py`는 nbformat 검증 후 각 Notebook을 같은 Kernel에서 두 번
 실행하고 텍스트·숫자·PNG 출력이 같은지 확인한다. 별도의 작은 테스트 kernelspec으로 현재
 pytest Python을 사용하며 사용자의 Kernel 등록 상태를 바꾸지 않는다. 기본 library 설치에서는
@@ -116,7 +126,8 @@ python -m pytest -q tests/test_dlfs4_notebooks.py
 ## 실행 결과
 
 선택적 Notebook 의존성을 설치한 Python 3.12에서 세 Notebook의 Run All을 같은 Kernel에서
-각각 두 번 실행했다. 모든 텍스트·숫자·PNG 출력이 일치했고, 13개 그림의 표시도 확인했다.
+각각 두 번 실행했다. 모든 텍스트·숫자·PNG 출력이 일치했고, 기존 13개 그림을 보존해
+MC Control의 3개 그림을 추가했다.
 실행 출력은 `.ipynb`에 저장되어 있으며 다음 값은 재현성 검증 결과다.
 
 | 실습 | 조건 | 결과 |
@@ -124,17 +135,21 @@ python -m pytest -q tests/test_dlfs4_notebooks.py
 | DP | γ=.9 | Policy/Value Iteration의 V 차이 0, 최적 V(start)=.6561 |
 | MC | 환경 seed=7, 행동 seed=8, 1,000 Episode, 45,188 Step, γ=.9 | First RMSE=.0306, Every RMSE=.0317 |
 | MC/TD 동일 경험 비교 | 같은 Episode/Step, TD α=.01 | Every MC RMSE=.0317, TD RMSE=.0239 |
+| On-policy MC Control | 환경·PyTorch seed=7, 1,000 Episode, 5,672 Step, γ=.9, ε=.1, First-visit | 초기 Greedy는 20 Step cutoff; 학습 후 5 Step·+1로 목표 도달, 마지막 100 Training 평균 보상 1.0 |
 | Q-learning | seed=7, 1,000 Episode, γ=.9, α=.8, ε=.1 | Truncation 0, 마지막 100 Episode 평균 보상 1.0; Greedy 5번 이동으로 목표 도달 |
 
 이 수치는 해당 설정의 관측 결과다. 방문이 적은 상태·행동의 Q는 초기값으로 남을 수 있으며
 시작 경로의 성공을 모든 Q의 수렴으로 해석하지 않는다. Gymnasium 경로는 기존 Sampler의
 동일 seed 결과를 재현하는 대신, 자체 재실행 결정성과 정책·전이 분포를 검증한다.
-전체 pytest는 1,092 passed, 18 skipped(CUDA 미지원)였고 공식 Gymnasium Checker,
-quickstart·DP/MC/TD/FrozenLake·CartPole Smoke Test도 통과했다.
+계산은 반복 상태-행동 쌍·Sample Average·Count·Checkpoint·입력 경계의 결정적 테스트로,
+환경 실행은 짧은 재현성/종료 테스트로 검증한다. 단일 Seed의 학습 성공률로 합격을 판정하지 않는다.
+전체 pytest는 1,136 passed, 20 skipped(CUDA 미지원)였고 세 Notebook Run All 두 번,
+quickstart·DP/MC/TD/FrozenLake·CartPole Smoke Test도 통과했다. 기존 05 Notebook의
+코드 셀 10개 출력은 이전 commit과 정확히 일치했다.
 
 ## 최소 확장 제안
 
-- MC Control: Q Return 갱신과 명시적인 정책 개선을 조합하는 별도 작은 Learner. 원본 Control의 고정 α와 Prediction의 sample average를 구분한다.
+- MC Control 확장: 현재 Sample Average와 별도로 원본 고정 α 갱신·GLIE 등의 의미를 설계한다. 이번 구현에 이미 포함됐다고 간주하지 않는다.
 - SARSA: `learn(batch, next_actions)`처럼 실제 수집한 다음 행동을 전달하고 기존 TD0TargetGenerator/TabularQUpdateRule을 재사용한다. 현재 Transition 필드를 임의로 추가하지 않는다.
 - Off-policy: 어떤 시점의 π/b를 쓰는지, Ordinary/Weighted/Per-decision 보정과 gradient/저장 경계를 먼저 결정한다. 기존 log_prob만 있다고 완성되는 것은 아니다.
 - 제자리 DP: 필요할 때 별도 모드의 수치 의미를 설계한다. Notebook 단순화를 위해 지금 추가하지 않는다.

@@ -7,7 +7,7 @@
 - 새로운 추상 계층, 불필요한 Registry 또는 GUI 코드를 도입하지 않는다.
 
 ## 현재 저장소의 범위
-- 현재는 Model·경험 데이터(Transition/TransitionBatch/Episode)·ReplayBuffer·TD(0)/MC Return·Tabular TD 갱신·Neural TD Loss·TabularQLearner·DQNLearner·DP Phase 1·MC Prediction Phase 2·TD(0) Prediction Phase 3의 참조 구현이다. FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD 비교를 실행할 수 있다. Runner, Agent, SARSA, MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
+- 현재는 Model·경험 데이터(Transition/TransitionBatch/Episode)·ReplayBuffer·TD(0)/MC Return·Tabular TD 갱신·Neural TD Loss·TabularQLearner·DQNLearner·DP·MC/TD(0) Prediction·On-policy MC Control의 참조 구현이다. FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD 비교와 교재 Gridworld MC Control을 실행할 수 있다. Runner, Agent, SARSA, Off-policy MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
 - 아래 Model 계약과 파일 배치는 이미 구현되어 있다. 기존 구현을 먼저 검토하고 중복 계층을 만들지 않는다.
 - 정수 입력은 기본적으로 torch.long으로 정규화한다. 정수로 저장된 연속 관측은 명시적인 InputAdapter dtype 설정을 사용한다.
 - Distributional 결과는 출력 payload에 담을 수 있으나, 해당 estimator/selector 및 학습 알고리즘이 구현된 것은 아니다.
@@ -44,7 +44,7 @@
 - `component/action_selector/`
 - `component/buffer/`, `component/target_generator/{base,td0,monte_carlo}.py`
 - `component/update_rule/{tabular,td_loss}.py`
-- `learner/{__init__,tabular_q,dqn,mc_prediction,tabular_td0}.py`
+- `learner/{__init__,tabular_q,dqn,mc_prediction,mc_control,tabular_td0}.py`
 - `dp/{__init__,algorithms}.py`, `environment/{__init__,gridworld,dlfs4_gridworld,episode_sampler,tabular_env,episode_collection}.py`
 
 ## TargetGenerator 계약
@@ -85,6 +85,11 @@
 - visit_counts는 Model.state_dict에 포함되지 않는 Learner의 long Tensor다. 재개 시 V-table과 Counts를 같은 gamma·visit_mode·정책으로 함께 복원한다. 환경 RNG와 행동 선택 RNG도 별도 학습 상태다.
 - TabularEpisodeSampler의 기존 공개 API와 RNG·종료 계약은 호환성을 위해 유지한다. 새 예제·Notebook은 Gymnasium 환경에서 collect_episode로 수집한다. 기본 MC 예제는 truncated-only Episode를 버리고 계속하는 대신 실험을 명시적으로 중단한다.
 
+## On-policy MC Control 계약
+- TabularMCControlLearner(model, return_generator, visit_mode="first")는 기존 TabularQEstimator의 Q-table을 직접 갱신한다. First/Every 방문 단위는 시간순 (state, action) 쌍이며 Count는 long (S,A)다. Return은 기존 Generator를 사용하고 Sample Average 수식만 Learner에 둔다.
+- learn(episode)는 자연 종료된 Episode만 no_grad에서 학습하고 모든 시점의 Return (T,)을 table dtype/device로 반환한다. 입력 Episode를 수정하지 않고 마지막 next_observation을 추가 방문으로 세지 않는다. Model과 Counts를 함께 저장·복원한다.
+- 행동 선택은 기존 Model/ActionSelector, 수집은 collect_episode의 책임이다. 수집 중 Q와 epsilon을 고정하고 갱신 이후 다음 Episode의 정책이 바뀐다. Learner는 환경·MDP·Sampler·Optimizer를 소유하지 않는다. epsilon schedule과 결정적 Greedy 평가는 외부 책임이다.
+
 ## 실행 환경 계약
 - Gymnasium은 필수 의존성이며 examples extra는 설치 호환성만 유지한다. TabularMDP는 DP용 수학적 모델, TabularEnv는 그 kernel을 샘플링하는 gymnasium.Env다. Model/Learner API는 바꾸지 않는다.
 - reset/step/render/close와 Discrete spaces를 사용한다. 환경은 super().reset(seed=seed)와 np_random으로 시작·Outcome만 선택한다. Policy/Model/Learner와 행동 RNG는 호출자 책임이며 global NumPy RNG를 사용하지 않는다.
@@ -121,6 +126,7 @@
 - CartPole 확인: `python -m examples.cartpole_dqn`. 전체 학습 성능은 예제로 보고하고 pytest에서는 결정적인 계산과 짧은 환경 Smoke Test를 검증한다.
 - Gridworld DP 확인: `python -m examples.gridworld_dp`. 환경 step 없이 NumPy로 Sutton 참조 V와 Policy/Value Iteration의 최적 V를 검증한다.
 - Gridworld MC 확인: `python -m examples.gridworld_mc`. 같은 Uniform Policy에서 First/Every-visit을 비교하고 14개 비종료 상태의 DP 대비 RMSE를 보고한다. RMSE의 단조 감소를 pytest 조건으로 사용하지 않는다.
+- 교재 MC Control 확인: `python -m examples.gridworld_mc_control`. Training Reward와 Greedy 평가를 구분하고 DP 최적 5 Step과 비교한다. 확률적 성능을 단일 Seed 합격 조건으로 삼지 않는다.
 - Gridworld TD 비교: `python -m examples.gridworld_td --seeds 7 11 19`. 동일 경험에서 MC 두 모드와 TD alpha=.01/.05/.1을 비교한다. Episode/step별 RMSE와 Seed별 평균·표준편차를 보고하며 특정 알고리즘의 우위를 pytest 조건으로 삼지 않는다.
 
 ## Git 작업 원칙

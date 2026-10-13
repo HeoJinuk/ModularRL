@@ -2,10 +2,10 @@
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
 ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·DQNLearner와
-Tabular Dynamic Programming Phase 1, Monte Carlo Prediction Phase 2 및 TD(0) Prediction Phase 3 참조 구현이다.
+Tabular DP, Monte Carlo/TD(0) Prediction 및 On-policy MC Control 참조 구현이다.
 Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole, DP/MC/TD Prediction 비교는
-Sutton Gridworld 예제에서 실행할 수 있다. Runner, Agent, SARSA,
-MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
+Sutton Gridworld, On-policy MC Control은 교재 3×4 Gridworld에서 실행할 수 있다. Runner, Agent,
+SARSA, Off-policy MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
 
@@ -842,8 +842,8 @@ Sutton/DLFS4의 모든 비종료 전이, 시작·행동·Outcome 분포와 재�
 Sutton & Barto의 [Chapter 5, Monte Carlo Prediction](https://www.incompleteideas.net/book/bookdraft2018mar21.pdf)을
 참고한다. DP는 알려진 확률 모델의 모든 결과를 합산하고, MC는 고정 정책에서 수집한 실제
 완료 Episode의 Return을 평균한다. 환경에서 경험을 수집하는 코드와 그 Episode만 보는
-Learner를 분리한다. MC Control, Off-policy Importance Sampling, Function Approximation은
-이번 범위에 포함하지 않는다.
+Learner를 분리한다. 이 Prediction API는 V 추정만 담당하며 On-policy Q Control은 아래 별도
+Learner로 구현한다. Off-policy Importance Sampling과 Function Approximation은 아직 포함하지 않는다.
 
 ### Episode와 Replay Batch
 
@@ -998,6 +998,98 @@ Every=.619912/.295867/.240866이었다. 마지막 Every RMSE는 이전 구간보
 truncated 전이에서 Bootstrap이 가능하다. 고정 정책 V_pi 비교에는 기존 DP 참조값을 그대로 사용한다.
 Phase 2의 Episode 계약을 아래 Phase 3에서 그대로 재사용한다. 범용 Trajectory Framework는 추가하지 않는다.
 
+## Tabular On-policy Monte Carlo Control
+
+Sutton & Barto의 [Chapter 5 강의 자료](https://people.cs.umass.edu/~barto/courses/cs687/Chapter%205.pdf)의
+Episode 단위 평가·정책 개선 흐름을 따른다. Prediction이 고정 정책의 V(s)를 추정한다면
+Control은 Q(s,a)를 추정해 다음 Episode의 행동을 개선한다. 기존 MonteCarloReturnGenerator,
+Episode, TabularQEstimator, Model, EpsilonGreedyActionSelector와 collect_episode를 재사용한다.
+새 BaseLearner, UpdateRule, 정책 행렬 관리자, Sampler는 추가하지 않는다.
+
+| 공개 API / 데이터 | 계약 |
+|---|---|
+| `TabularMCControlLearner(model, return_generator, visit_mode="first")` | TabularQEstimator Model과 기존 MC Return Generator, first/every 지원 |
+| `learn(episode: Episode) -> Tensor` | 같은 Model의 table을 no_grad에서 in-place 갱신, 전체 Return `(T,)` 반환 |
+| observation / action | scalar integer 인덱스, table 범위 확인 후 long 정규화 |
+| reward / 반환 Return | live Q-table의 floating dtype·device, 반환 graph 없음 |
+| `visit_counts` | Learner 소유 long Tensor `(S,A)`, learn 시 table device를 따름 |
+
+학습의 두 단계는 기존 Generator로 전체 Return을 계산한 뒤, 원래 시간 순서에서 상태-행동
+방문을 고르고 아래 Sample Average를 갱신하는 것이다.
+
+```text
+count[s,a] += 1
+Q[s,a] += (G_t - Q[s,a]) / count[s,a]
+```
+
+First-visit는 상태가 아닌 (s,a)의 가장 이른 방문이다. 같은 상태의 다른 행동은 각각 첫 방문이
+될 수 있다. Every-visit는 반복 쌍의 Return도 시간순으로 모두 포함한다. 마지막 next_observation은
+방문이 아니다. states=[1,2,1], actions=[0,1,0], rewards=[1,2,3], gamma=1이면 Return=[6,5,3],
+First Q(1,0)=6/count=1, Every Q(1,0)=4.5/count=2이고 Q(2,1)=5다.
+초기 Q를 가상 sample로 세지 않는다. 입력 Episode는 수정하지 않고 Return overflow 및 잘못된
+인덱스는 table/count 갱신 전에 실패한다. 열린 Episode·truncated-only는 거절한다.
+자연 종료와 TimeLimit이 동시에 True면 완료된 Return으로 학습할 수 있다.
+
+### 정책과 Episode 경계
+
+```python
+model = Model(IdentityRepresentation(), TabularQEstimator(11, 4),
+              EpsilonGreedyActionSelector(epsilon=0.1))
+learner = TabularMCControlLearner(model, MonteCarloReturnGenerator(gamma=0.9))
+episode = collect_episode(env, lambda state: model.act(state).action.item(), seed=7)
+returns = learner.learn(episode)
+```
+
+collect_episode의 기존 int callback으로 Model.act를 바로 사용할 수 있다. 수집 중 Q 및 epsilon은
+고정하고 자연 종료 후 learn을 호출한다. 다음 Episode부터 같은 Model과 Selector가 새 Q를
+참조하므로 별도 Policy 행렬 생성이나 동기화가 없다. Representation은 Identity처럼 인덱스를 보존한다.
+Learner 자체는 Selector를 요구하거나 호출하지 않는다. On-policy 경험 수집은 호출자 책임이며
+과거의 다른 행동 정책 경험을 재생하거나 IS 보정을 자동으로 적용하지 않는다.
+
+기존 행동 확률은 `epsilon/A + (1-epsilon)*I(a in maxima)/len(maxima)`다. 탐색을 포함한
+stochastic 동률은 균등, deterministic 평가에서는 epsilon을 무시하고 최소 인덱스 최대 행동을
+고른다(log_prob=None). epsilon 속성 setter로 외부 Episode 경계에서 schedule을 설정할 수 있다.
+환경은 첫 reset seed와 이후 None의 RNG stream, 행동 선택은 PyTorch RNG를 사용한다.
+평가는 별도 환경의 deterministic=True로 수행하며 학습하지 않는다.
+
+### Checkpoint와 수렴 해석
+
+Q-table과 epsilon은 기존 Model.state_dict에 포함되지만 visit_counts는 포함되지 않는다.
+재개 시 Model과 같은 형태의 long Count, gamma, visit_mode를 함께 저장·복원한다.
+예를 들어 `torch.save({"model": model.state_dict(), "visit_counts": learner.visit_counts.clone(),
+"gamma": learner.return_generator.gamma, "visit_mode": learner.visit_mode}, path)`로 저장하고,
+새 Model/Learner 구성 후 `model.load_state_dict(saved["model"])`,
+`learner.visit_counts.copy_(saved["visit_counts"])`로 복원한다. Model dtype/device도 유지한다.
+완전한 실험 재개에는 Episode 번호와 환경 RNG, CPU/CUDA PyTorch 행동 RNG 상태도 필요하다.
+Count만 초기화하면 이전 Return 평균의 정상적인 재개가 아니다.
+
+고정 epsilon은 탐색을 유지한다. 변화하는 행동 정책에서 관측한 과거 Return의 평균을 사용하므로
+유한 표본의 max Q가 DP의 최적 V와 같다고 주장하지 않는다. GLIE schedule, Exploring Starts,
+Off-policy IS 또는 다른 수렴 기능을 구현한 것으로 간주하지 않는다.
+
+### 교재 Gridworld 검증
+
+```bash
+python -m examples.gridworld_mc_control --episodes 1000 --seed 7 --epsilon .1
+```
+
+`examples/gridworld_mc_control.py`는 Gymnasium 환경과 Model.act로 Episode를 수집한 뒤 Learner를
+호출한다. gamma=.9, epsilon=.1, First-visit, fixed start (2,0), float64다. 학습 cap=2000,
+Greedy 평가 cap=20이며 두 환경은 finally에서 닫는다. truncated-only 학습 표본은 조용히
+버리지 않고 갱신 전에 실험을 중단한다. Episode/누적 Step별 Training Reward와 Greedy 성공·길이·보상,
+Q, Count, 정책 및 DP 최적 경로를 보고한다.
+
+seed=7, 1,000 Episode 실행은 5,672 Step, cutoff 0이었다. 초기 Greedy는 목표에 도달하지 못하고
+20 Step에서 잘렸으며, 학습 후에는 5 Step·보상 +1로 목표에 도달했다. 마지막 100 Training Episode의
+평균 보상은 1.0이었다. DP 최적 경로도 5 Step이며 V*(start)=.6561이다. 전체 상태·행동의
+Count가 충분하다는 뜻은 아니며 단일 Seed의 성공률·길이를 pytest 합격 조건으로 삼지 않는다.
+
+`05_mc_modularrl.ipynb`의 기존 Prediction 뒤에 On-policy MC Control 구성·학습·Q와 정책 표시,
+DP 비교를 추가한다. 원본 고정 alpha=.1/10,000 Episode와 달리 Sample Average/1,000 Episode다.
+Off-policy MC는 수집 시점 behavior 확률 보존과 보정 Return 계약을 먼저 정해야 한다.
+현재 int callback 수집기는 log_prob을 저장하지 않으며 On-policy Control에서는 필요하지 않다.
+SARSA는 실제 next_action과 선택 시점, terminated/truncated의 Bootstrap 의미를 명시한 입력 계약이 필요하다.
+
 ## Tabular TD(0) Prediction Phase 3
 
 Sutton & Barto의 [Chapter 6, TD Prediction](https://www.incompleteideas.net/book/bookdraft2018mar21.pdf)을
@@ -1120,14 +1212,14 @@ Episode 수집은 공통 collect_episode로 처리한다. 비교 예제와 MC �
 유지한다. 추가 통합 리팩터링은 현재 필요하지 않다.
 
 SARSA는 수집 시 실제 선택한 next_action을 명시적으로 전달하는 계약이 먼저 필요하다.
-그 후 기존 TD0TargetGenerator와 TabularQUpdateRule을 재사용할 수 있다. MC Control은
-상태-행동 Return 평균/Count와 외부 탐색 정책 개선이 필요하며 기존 V Prediction을 변경하지 않는다.
+그 후 기존 TD0TargetGenerator와 TabularQUpdateRule을 재사용할 수 있다. On-policy MC Control은
+위의 별도 Q Learner로 구현했으며 기존 V Prediction을 변경하지 않는다. Off-policy Return 보정은 아직 없다.
 
 ## 교재 Notebook과 최소 사용성 API
 
 `notebooks/dlfs4/`는 『밑바닥부터 시작하는 딥러닝 4』 Chapter 4–6의 확인한 원본 실습을
 공개 API 호출로 표현한다. 알고리즘은 Notebook에서 재구현하지 않는다. DP의 제자리 모드,
-MC Control/Off-policy MC Control, SARSA/Off-policy SARSA는 미구현으로 명시하며
+Off-policy MC Control, SARSA/Off-policy SARSA는 미구현으로 명시하며
 [원본 실습 대응표](../notebooks/dlfs4/README.md)에 각 파일·설정·지원 상태·차이를 기록한다.
 
 `environment/dlfs4_gridworld.py`는 3×4 교재 TabularMDP와 그 Gymnasium 실행 환경 생성 함수를 제공한다.
@@ -1153,7 +1245,9 @@ Run All 두 번의 실제 출력 비교는 같은 Kernel에서 수행하며 core
 Gymnasium 경로의 Notebook Run All 검증에서 MC/TD는 동일한 1,000 Episode, 45,188 step을
 사용했다. 비종료 상태 DP 대비 RMSE는 First MC=.0306, Every MC=.0317, TD=.0239였고
 Q-learning은 cutoff 0, 마지막 100 Episode 평균 보상 1.0, Greedy 5번 이동으로 목표에 도달했다.
-세 Notebook의 텍스트·수치·13개 PNG 출력이 같은 Kernel의 두 실행에서 일치했다.
+MC Control 섹션은 seed=7의 1,000 Episode·5,672 step 이후 Greedy 5 Step·보상 +1을 보였다.
+기존 13개 그림을 보존하고 Control의 Q/정책·DP 비교·성능 그림 3개를 추가했으며,
+세 Notebook의 텍스트·수치·16개 PNG 출력이 같은 Kernel의 두 실행에서 일치했다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 

@@ -1,6 +1,6 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, DQNLearner, tabular DP and MC/TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN and Sutton Gridworld DP/MC/TD comparison. Runner, Agent, SARSA, MC control and other Neural Learners are not implemented.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, DQNLearner, tabular DP, MC/TD(0) prediction and on-policy MC control**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC control. Runner, Agent, SARSA, off-policy MC control and other Neural Learners are not implemented.
 
 ## Layout
 
@@ -19,6 +19,7 @@ modular_rl/
 │   ├── tabular_q.py               # External replay batch → Q-learning update
 │   ├── dqn.py                     # Online gather → target bootstrap → optimizer step
 │   ├── mc_prediction.py           # Complete episode → first/every sample average
+│   ├── mc_control.py              # Complete episode → state-action sample averages
 │   └── tabular_td0.py             # External batch → next V → TD target → V update
 ├── dp/
 │   └── algorithms.py              # Policy evaluation/improvement/iteration, value iteration
@@ -494,6 +495,53 @@ expected to generate the same episodes for that seed. Tests check distributions,
 mathematics and repeatability without requiring monotonically decreasing RMSE.
 See [Architecture](docs/ARCHITECTURE.md) for contracts and checkpoint responsibilities.
 
+## Tabular on-policy Monte Carlo control
+
+`TabularMCControlLearner(model, return_generator, visit_mode="first").learn(episode)`
+updates the existing TabularQEstimator table and returns all discounted returns
+`(T,)`, detached, on the table's dtype/device. First/every selection is by the
+**(state, action)** pair, in chronological order. It uses incremental sample
+averages and long `visit_counts` `(S,A)`; save these separately with Model.state_dict,
+gamma and visit mode. The final next observation is not another visit.
+
+```python
+from modular_rl.component.action_selector import EpsilonGreedyActionSelector
+from modular_rl.component.estimator import TabularQEstimator
+from modular_rl.component.representation import IdentityRepresentation
+from modular_rl.component.target_generator import MonteCarloReturnGenerator
+from modular_rl.environment import make_dlfs4_gridworld_env, collect_episode
+from modular_rl.learner import TabularMCControlLearner
+from modular_rl.model import Model
+
+model = Model(IdentityRepresentation(), TabularQEstimator(11, 4),
+              EpsilonGreedyActionSelector(epsilon=0.1))
+learner = TabularMCControlLearner(model, MonteCarloReturnGenerator(gamma=0.9))
+env = make_dlfs4_gridworld_env()
+try:
+    episode = collect_episode(env, lambda state: model.act(state).action.item(), seed=7)
+    returns = learner.learn(episode)
+finally:
+    env.close()
+```
+
+Set `torch.manual_seed(...)` for behavior-action reproducibility as well as the
+environment seed. Keep Q and epsilon fixed during collection. After learning,
+the same Model.act uses updated Q in the next episode. Learner owns no environment,
+policy matrix, sampler or optimizer. Truncated-only episodes are rejected.
+Evaluation uses `model.act(..., deterministic=True)` without exploration or
+learning. Change epsilon at episode boundaries in the external loop if desired.
+
+```bash
+python -m examples.gridworld_mc_control --episodes 1000 --seed 7 --epsilon 0.1
+```
+
+With gamma=.9, seed=7 and 1,000 first-visit episodes, training collected 5,672
+steps with no cutoff. Before training, greedy evaluation hit the 20-step cap;
+after training it reached the goal in 5 steps with reward +1, matching the DP
+optimal path length. The last 100 training episodes had mean reward 1.0.
+Fixed epsilon continues exploration; these measured results do not assert all Q
+values equal Q* or impose a stochastic score threshold in pytest.
+
 ## Tabular TD(0) prediction and DP/MC comparison
 
 `TabularTD0PredictionLearner(model, target_generator, update_rule).learn(batch)`
@@ -533,7 +581,8 @@ for alpha=0.01 / 0.05 / 0.1. These are measured results, not performance thresho
 Chapters 4–6 tutorials are in [notebooks/dlfs4](notebooks/dlfs4/README.md).
 They use the book's **3×4** GridWorld, separate from Sutton's 4×4 environment.
 DP, MC Prediction, TD(0) Prediction and Q-learning call ModularRL's public APIs.
-The source correspondence table explicitly lists unsupported MC Control and SARSA exercises.
+The source correspondence table records the sample-average MC Control extension
+and explicitly lists unsupported off-policy MC Control and SARSA exercises.
 
 From the project root, install the optional stack and register/select its kernel:
 
