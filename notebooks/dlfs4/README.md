@@ -44,6 +44,22 @@ utils의 argmax/greedy_probs/plot_total_reward다. 원본 Agent들은 행동 선
 가치·Count를 만들지 않고 표시에서 회색 칸으로 남긴다. RMSE는 목표도 제외한 10개 상태다.
 Sutton 4×4 환경과 별도의 정의이며 기존 `sutton_gridworld()`는 바꾸지 않았다.
 
+DP는 알려진 `dlfs4_gridworld()` 모델의 기대값을 직접 계산한다. MC/TD/Q-learning은
+`make_dlfs4_gridworld_env()`의 Gymnasium reset/step을 사용하며 같은 kernel을 공유한다.
+정수 observation/action은 Discrete space에 속한다. 기본 시작은 7이며 reset options의
+start_state로 이번 Episode만 바꿀 수 있다. render_mode는 None/ansi/human이다.
+
+환경은 첫 reset의 seed=7과 이후 reset(seed=None)으로 전이 RNG stream을 이어간다.
+MC/TD의 외부 행동 Generator는 seed=8, Q-learning 행동 선택은 PyTorch seed=7이다.
+TabularEpisodeSampler는 기존 API만 유지하며 이 Notebook에서는 사용하지 않는다.
+난수 사용 순서가 달라졌으므로 이전 Sampler의 동일 seed 결과와 같은 Episode를 요구하지 않는다.
+
+MC/TD는 작은 `collect_episode(env, select_action, ...)`로 동일한 Episode를 수집한다.
+MC/TD 비교의 TimeLimit은 2,000 Step, Q-learning은 200 Step, Greedy 평가는 20 Step이다.
+terminated 또는 truncated이면 reset하며 실제 마지막 관측을 보존한다. MC는 truncated-only
+Episode를 학습하지 않고 비교를 중단한다. TD/Q는 terminated에서만 Bootstrap을 제거한다.
+제한 시점의 자연 종료는 두 flag가 True일 수 있다. 환경은 finally에서 닫는다.
+
 원본 환경의 40개 비종료 상태·행동 전이와 대조해 next state/reward/termination이 일치했다.
 γ=.9, 허용오차 1e−12에서 원본 Policy Evaluation과 V의 최대 오차는 2.763e−12,
 원본 Value Iteration과 최적 V의 오차는 0이었다. 시작 최적 V는 .9⁴=.6561이다.
@@ -62,16 +78,16 @@ Sutton 4×4 환경과 별도의 정의이며 기존 `sutton_gridworld()`는 바�
 | ch04/policy_iter.py: greedy_policy/policy_iter | 04 §5–6 | action_values, policy_improvement, policy_iteration | 실행 완료 | 동률 마지막 행동 → 균등 확률; 중간 애니메이션 없이 개선·최종 결과 표시 |
 | ch04/value_iter.py: value_iter_onestep/value_iter | 04 §7–8 | value_iteration | 실행 완료 | 동기식; PI와 같은 최적 V인지 확인 |
 | ch05/dice.py: sample, 표본 평균 | 05 §2 | NumPy 표본·누적 평균 | 실행 완료 | RL 갱신이 아닌 통계 실습; 중간 print 대신 그래프 |
-| ch05/mc_eval.py: RandomAgent, Every-visit V | 05 §3–7 | Episode, TabularEpisodeSampler, MonteCarloReturnGenerator, MCPredictionLearner | 실행 완료 | Every는 유지; First·Count·DP RMSE 추가; 원본 역순 평균 갱신 → 시간순 평균 |
+| ch05/mc_eval.py: RandomAgent, Every-visit V | 05 §3–7 | make_dlfs4_gridworld_env, collect_episode, Episode, MonteCarloReturnGenerator, MCPredictionLearner | 실행 완료 | Every는 유지; First·Count·DP RMSE 추가; 원본 역순 평균 갱신 → 시간순 평균 |
 | ch05/mc_control.py: McAgent, Q와 ε-greedy 개선 | 05 §8 | 해당 Learner 없음 | 미구현 | γ=.9, α=.1, ε=.1; 상태-행동 Return 갱신과 외부 정책 개선 필요 |
 | ch05/importance_sampling.py: 확률변수 평균/분산 | 05 §9 | NumPy 표본·ρ=π/b | 실행 완료 | Seed 명시; 이 통계 실습을 Off-policy RL 구현으로 부르지 않음 |
 | ch05/mc_control_offpolicy.py: McOffPolicyAgent | 05 §10 | 해당 Learner 없음 | 미구현 | γ=.9, α=.2, ε=.1; Return 보정·target/behavior 계약 필요 |
-| ch06/td_eval.py: TdAgent | 06 §2–5 | TabularTD0PredictionLearner, TD0TargetGenerator, TabularVUpdateRule, Transition.to_batch | 실행 완료 | 원본 전이별 TD 유지; 비교 Episode는 먼저 수집 후 같은 순서 처리 |
+| ch06/td_eval.py: TdAgent | 06 §2–5 | collect_episode, TabularTD0PredictionLearner, TD0TargetGenerator, TabularVUpdateRule, Transition.to_batch | 실행 완료 | 원본 전이별 TD 유지; Gymnasium Episode는 먼저 수집 후 같은 순서 처리 |
 | ch06/sarsa.py: SarsaAgent, deque(maxlen=2) | 06 §6 | 해당 Learner 없음 | 미구현 | 실제 next_action 전달 계약 필요; max Q로 대신하지 않음 |
 | ch06/sarsa_off_policy.py: SarsaOffPolicyAgent | 06 §7 | 해당 Learner 없음 | 미구현 | 다음 행동·행동 확률의 수집 시점과 IS Target 보정 계약 필요 |
-| ch06/q_learning.py: QLearningAgent, π/b 분리 | 06 §8–9 | Model.act, EpsilonGreedyActionSelector, TabularQLearner, TD0TargetGenerator, TabularQUpdateRule | 실행 완료 | 10,000 → 1,000 Episode; π/b dict 대신 Model/Selector; Q 네 행동 표시 |
+| ch06/q_learning.py: QLearningAgent, π/b 분리 | 06 §8–9 | env.reset/step, Model.act, EpsilonGreedyActionSelector, TabularQLearner, TD0TargetGenerator, TabularQUpdateRule | 실행 완료 | 10,000 → 1,000 Episode; π/b dict 대신 Model/Selector; Q 네 행동 표시 |
 | ch06/q_learning_simple.py: 간소화 QLearningAgent | 06 §8–10 | 같은 Model/Learner | 실행 완료·통합 | 중복 루프 없이 두 예제의 공통 갱신 사용; stochastic 동률은 균등, deterministic은 최소 인덱스 |
-| common/gridworld.py: GridWorld | 세 Notebook 환경 구성 | dlfs4_gridworld, DLFS4_STATES/START_STATE | 실행 완료 | 알려진 kernel과 실행 루프 분리; compact State ID |
+| common/gridworld.py: GridWorld | 세 Notebook 환경 구성 | dlfs4_gridworld, make_dlfs4_gridworld_env, TabularEnv, DLFS4_STATES/START_STATE | 실행 완료 | DP의 알려진 kernel과 Gymnasium 실행 환경 분리; compact State ID |
 | common/gridworld_render.py: Renderer | 세 Notebook 결과 표시 | plot_grid, Matplotlib | 실행 완료·간소화 | Q 삼각형 대신 행동별 heatmap; 목표 V=0과 진입 +1 구분 |
 | common/utils.py: argmax/greedy_probs/plot_total_reward | 06 §8–10 | ActionSelector.select/probabilities, plt.plot | 실행 완료·대체 | 원본 무작위 단일 argmax와 달리 동률 집합의 정확한 확률 사용 |
 | Notebook SETUP: 셀 내 pip install | 각 §1·프로젝트 README | notebooks extra, 공개 import | 실행 완료·대체 | Notebook에 설치·sys.path 탐색 코드 없음 |
@@ -106,13 +122,15 @@ python -m pytest -q tests/test_dlfs4_notebooks.py
 | 실습 | 조건 | 결과 |
 |---|---|---|
 | DP | γ=.9 | Policy/Value Iteration의 V 차이 0, 최적 V(start)=.6561 |
-| MC | seed=7, 1,000 Episode, 43,598 Step, γ=.9 | First RMSE=.0310, Every RMSE=.0238 |
-| MC/TD 동일 경험 비교 | 같은 Episode/Step, TD α=.01 | Every MC RMSE=.0238, TD RMSE=.0371 |
+| MC | 환경 seed=7, 행동 seed=8, 1,000 Episode, 45,188 Step, γ=.9 | First RMSE=.0306, Every RMSE=.0317 |
+| MC/TD 동일 경험 비교 | 같은 Episode/Step, TD α=.01 | Every MC RMSE=.0317, TD RMSE=.0239 |
 | Q-learning | seed=7, 1,000 Episode, γ=.9, α=.8, ε=.1 | Truncation 0, 마지막 100 Episode 평균 보상 1.0; Greedy 5번 이동으로 목표 도달 |
 
 이 수치는 해당 설정의 관측 결과다. 방문이 적은 상태·행동의 Q는 초기값으로 남을 수 있으며
-시작 경로의 성공을 모든 Q의 수렴으로 해석하지 않는다. 전체 pytest는 1,050 passed,
-18 skipped(CUDA 미지원)였고 quickstart·기존 DP/MC/TD/FrozenLake/CartPole Smoke Test도 통과했다.
+시작 경로의 성공을 모든 Q의 수렴으로 해석하지 않는다. Gymnasium 경로는 기존 Sampler의
+동일 seed 결과를 재현하는 대신, 자체 재실행 결정성과 정책·전이 분포를 검증한다.
+전체 pytest는 1,092 passed, 18 skipped(CUDA 미지원)였고 공식 Gymnasium Checker,
+quickstart·DP/MC/TD/FrozenLake·CartPole Smoke Test도 통과했다.
 
 ## 최소 확장 제안
 

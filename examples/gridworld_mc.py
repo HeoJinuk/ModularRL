@@ -9,7 +9,7 @@ from modular_rl.component.estimator import TabularVEstimator
 from modular_rl.component.representation import IdentityRepresentation
 from modular_rl.component.target_generator import MonteCarloReturnGenerator
 from modular_rl.dp import policy_evaluation, uniform_policy
-from modular_rl.environment import TabularEpisodeSampler, sutton_gridworld
+from modular_rl.environment import make_sutton_gridworld_env, collect_episode
 from modular_rl.learner import MCPredictionLearner
 from modular_rl.model import Model
 
@@ -23,14 +23,15 @@ def train_and_compare(episodes=20_000, seed=7, max_steps=10_000, log_every=5000)
     """
     if episodes < 1:
         raise ValueError("episodes must be positive")
-    mdp = sutton_gridworld()
+    env = make_sutton_gridworld_env(max_episode_steps=max_steps)
+    mdp = env.unwrapped.mdp
     policy = uniform_policy(mdp)
     reference = policy_evaluation(mdp, policy, gamma=1, theta=1e-10)
     if not reference.converged:
         raise RuntimeError("DP reference did not converge")
     nonterminal = np.array([state for state in range(mdp.n_states) if state not in mdp.terminal_states])
-    start_rng = np.random.default_rng(seed)
-    sampler = TabularEpisodeSampler(mdp, policy, seed=seed + 1)
+    action_rng = np.random.default_rng(seed + 1)
+    select_action = lambda state: int(action_rng.choice(mdp.n_actions, p=policy[state]))
     learners = {}
     for mode in ("first", "every"):
         model = Model(IdentityRepresentation(), TabularVEstimator(mdp.n_states)).double()
@@ -43,22 +44,28 @@ def train_and_compare(episodes=20_000, seed=7, max_steps=10_000, log_every=5000)
     initial_rmse = rmse(learners["first"])
     steps = 0
     start_counts = np.zeros(mdp.n_states, dtype=np.int64)
-    for number in range(1, episodes + 1):
-        start = int(start_rng.choice(nonterminal))
-        episode = sampler.sample(start, max_steps=max_steps)
-        if not episode.terminated:
-            raise RuntimeError(f"episode={number} was truncated at {len(episode)} steps; "
-                               "MC did not learn it. Increase max_steps or inspect the policy.")
-        start_counts[start] += 1
-        steps += len(episode)
-        for learner in learners.values():
-            learner.learn(episode)
-        if log_every and (number % log_every == 0 or number == episodes):
-            print(f"episodes={number}/{episodes} steps={steps} "
-                  f"first_rmse={rmse(learners['first']):.6f} every_rmse={rmse(learners['every']):.6f}", flush=True)
+    truncated_episodes = 0
+    try:
+        for number in range(1, episodes + 1):
+            episode = collect_episode(env, select_action, seed=seed if number == 1 else None)
+            if not episode.terminated:
+                raise RuntimeError(f"episode={number} was truncated at {len(episode)} steps; "
+                                   "MC did not learn it. Increase max_steps or inspect the policy.")
+            start = episode.transitions[0].observation.item()
+            start_counts[start] += 1
+            truncated_episodes += int(episode.truncated)
+            steps += len(episode)
+            for learner in learners.values():
+                learner.learn(episode)
+            if log_every and (number % log_every == 0 or number == episodes):
+                print(f"episodes={number}/{episodes} steps={steps} "
+                      f"first_rmse={rmse(learners['first']):.6f} every_rmse={rmse(learners['every']):.6f}", flush=True)
+    finally:
+        env.close()
 
     results = {"episodes": episodes, "steps": steps, "initial_rmse": initial_rmse,
-               "reference": reference.values.copy(), "start_counts": start_counts}
+               "reference": reference.values.copy(), "start_counts": start_counts,
+               "truncated_episodes": truncated_episodes}
     for mode, learner in learners.items():
         values = learner.model.forward(np.arange(mdp.n_states)).values.v
         results[mode] = {"values": values.cpu().numpy().copy(),
@@ -74,7 +81,7 @@ def main():
     args = parser.parse_args()
     _, results = train_and_compare(args.episodes, args.seed, args.max_steps)
     print(f"Sutton 4x4 MC Prediction: gamma=1 seed={args.seed} "
-          f"episodes={results['episodes']} steps={results['steps']} truncated=0")
+          f"episodes={results['episodes']} steps={results['steps']} truncated={results['truncated_episodes']}")
     print(f"initial_rmse={results['initial_rmse']:.6f} (14 nonterminal states)")
     with np.printoptions(precision=4, suppress=True):
         print("DP uniform-policy V:")

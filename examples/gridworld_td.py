@@ -9,7 +9,7 @@ from modular_rl.component.representation import IdentityRepresentation
 from modular_rl.component.target_generator import MonteCarloReturnGenerator, TD0TargetGenerator
 from modular_rl.component.update_rule import TabularVUpdateRule
 from modular_rl.dp import policy_evaluation, uniform_policy
-from modular_rl.environment import TabularEpisodeSampler, sutton_gridworld
+from modular_rl.environment import make_sutton_gridworld_env, collect_episode
 from modular_rl.learner import MCPredictionLearner, TabularTD0PredictionLearner
 from modular_rl.model import Model
 
@@ -17,8 +17,8 @@ from modular_rl.model import Model
 def train_and_compare(episodes=5000, seed=7, alphas=(0.01, 0.05, 0.1), max_steps=10_000, log_every=1000):
     """Give independent learners identical complete episodes under uniform pi, gamma=1.
 
-    Starts are uniform over the 14 nonterminal states, using the same two RNG
-    seeds as gridworld_mc. A cutoff aborts before any learner processes that
+    The environment owns starts/outcomes; policy draws use a separate RNG, with
+    the same seeds as gridworld_mc. A cutoff aborts before any learner processes that
     episode. MC receives it whole; TD receives B=1 rows in chronological order.
     The episode is collected before learning, rather than using a live streaming
     Runner. RMSE history records both episode and environment-step coordinates.
@@ -27,14 +27,15 @@ def train_and_compare(episodes=5000, seed=7, alphas=(0.01, 0.05, 0.1), max_steps
         raise ValueError("episodes must be positive")
     if not alphas or len(set(alphas)) != len(alphas):
         raise ValueError("alphas must be a nonempty sequence of distinct step sizes")
-    mdp = sutton_gridworld()
+    env = make_sutton_gridworld_env(max_episode_steps=max_steps)
+    mdp = env.unwrapped.mdp
     policy = uniform_policy(mdp)
     reference = policy_evaluation(mdp, policy, gamma=1, theta=1e-10)
     if not reference.converged:
         raise RuntimeError("DP reference did not converge")
     nonterminal = np.array([s for s in range(mdp.n_states) if s not in mdp.terminal_states])
-    start_rng = np.random.default_rng(seed)
-    sampler = TabularEpisodeSampler(mdp, policy, seed=seed + 1)
+    action_rng = np.random.default_rng(seed + 1)
+    select_action = lambda state: int(action_rng.choice(mdp.n_actions, p=policy[state]))
     learners = {}
     for mode in ("first", "every"):
         model = Model(IdentityRepresentation(), TabularVEstimator(mdp.n_states)).double()
@@ -54,30 +55,35 @@ def train_and_compare(episodes=5000, seed=7, alphas=(0.01, 0.05, 0.1), max_steps
     history = [{"episodes": 0, "steps": 0, "rmse": errors()}]
     steps = 0
     start_counts = np.zeros(mdp.n_states, dtype=np.int64)
-    for number in range(1, episodes + 1):
-        start = int(start_rng.choice(nonterminal))
-        episode = sampler.sample(start, max_steps=max_steps)
-        if not episode.terminated:
-            raise RuntimeError(f"episode={number} was truncated at {len(episode)} steps; "
-                               "no learner processed it. Increase max_steps or inspect the policy.")
-        start_counts[start] += 1
-        steps += len(episode)
-        for mode in ("first", "every"):
-            learners[mode].learn(episode)
-        for transition in episode.transitions:
-            batch = transition.to_batch()
-            for learner in td_learners.values():
-                learner.learn(batch)
-        if number == episodes or (log_every and number % log_every == 0):
-            metrics = errors()
-            history.append({"episodes": number, "steps": steps, "rmse": metrics})
-            if log_every:
-                print(f"seed={seed} episodes={number}/{episodes} steps={steps} " +
-                      " ".join(f"{name}={rmse:.6f}" for name, rmse in metrics.items()), flush=True)
+    truncated_episodes = 0
+    try:
+        for number in range(1, episodes + 1):
+            episode = collect_episode(env, select_action, seed=seed if number == 1 else None)
+            if not episode.terminated:
+                raise RuntimeError(f"episode={number} was truncated at {len(episode)} steps; "
+                                   "no learner processed it. Increase max_steps or inspect the policy.")
+            start = episode.transitions[0].observation.item()
+            start_counts[start] += 1
+            truncated_episodes += int(episode.truncated)
+            steps += len(episode)
+            for mode in ("first", "every"):
+                learners[mode].learn(episode)
+            for transition in episode.transitions:
+                batch = transition.to_batch()
+                for learner in td_learners.values():
+                    learner.learn(batch)
+            if number == episodes or (log_every and number % log_every == 0):
+                metrics = errors()
+                history.append({"episodes": number, "steps": steps, "rmse": metrics})
+                if log_every:
+                    print(f"seed={seed} episodes={number}/{episodes} steps={steps} " +
+                          " ".join(f"{name}={rmse:.6f}" for name, rmse in metrics.items()), flush=True)
+    finally:
+        env.close()
 
     results = {"episodes": episodes, "steps": steps, "seed": seed, "gamma": 1,
                "reference": reference.values.copy(), "start_counts": start_counts, "history": history,
-               "methods": {}}
+               "methods": {}, "truncated_episodes": truncated_episodes}
     for name, learner in learners.items():
         results["methods"][name] = {"values": learner.model.estimator.v_table.cpu().numpy().copy(),
                                     "rmse": history[-1]["rmse"][name]}
@@ -99,7 +105,7 @@ def main():
         _, results = train_and_compare(args.episodes, seed, args.alphas, args.max_steps, args.log_every)
         runs.append(results)
         print(f"Sutton 4x4 DP/MC/TD(0): gamma=1 seed={seed} episodes={results['episodes']} "
-              f"steps={results['steps']} truncated=0 (RMSE: 14 nonterminal states)")
+              f"steps={results['steps']} truncated={results['truncated_episodes']} (RMSE: 14 nonterminal states)")
         with np.printoptions(precision=4, suppress=True):
             print("DP uniform-policy V:")
             print(results["reference"].reshape(4, 4))

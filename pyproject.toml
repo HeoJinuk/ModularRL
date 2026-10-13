@@ -7,10 +7,10 @@ name = "modularrl-model-contract-demo"
 version = "0.1.0"
 description = "A small, standalone ModularRL model interface reference (not the full project)"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.23", "torch>=2.0"]
+dependencies = ["numpy>=1.23", "torch>=2.0", "gymnasium>=1.0"]
 
 [project.optional-dependencies]
-examples = ["gymnasium>=1.0"]
+examples = []  # Compatibility extra; Gymnasium is now a required dependency.
 notebooks = ["matplotlib>=3.8", "nbformat>=5.10", "nbclient>=0.10", "ipykernel>=6.29", "jupyterlab>=4.0"]
 
 [tool.setuptools.packages.find]

@@ -23,9 +23,11 @@ modular_rl/
 ├── dp/
 │   └── algorithms.py              # Policy evaluation/improvement/iteration, value iteration
 ├── environment/
-│   ├── gridworld.py               # Reusable Sutton 4x4 known transition kernel
-│   ├── dlfs4_gridworld.py         # Book's 3x4 kernel and compact coordinate mapping
-│   └── episode_sampler.py         # External policy/outcome sampling with private RNG
+│   ├── gridworld.py               # Sutton kernel and Gymnasium environment constructor
+│   ├── dlfs4_gridworld.py         # Book's 3x4 kernel, coordinates and environment constructor
+│   ├── tabular_env.py            # Gymnasium Env sampling from a TabularMDP
+│   ├── episode_collection.py      # reset/step → ordered Episode, external action callback
+│   └── episode_sampler.py         # Legacy sampler API retained for compatibility
 └── component/
     ├── representation/
     │   ├── base.py                # BaseRepresentation
@@ -63,6 +65,53 @@ modular_rl/
 ```
 
 `__init__.py` files provide shorter import paths. To avoid the duplicated names in the first reference, `data/model.py` is now `data/outputs.py` and `model/model.py` is now `model/rl_model.py`. The public import `from modular_rl.model import Model` remains unchanged.
+
+## Gymnasium environments
+
+Gymnasium is a required dependency (`pip install -e .`). The existing `examples`
+extra remains accepted for installation compatibility; notebook tools remain optional.
+`TabularMDP` holds a known transition model for pure NumPy DP. `TabularEnv(mdp,
+start_state=None, render_mode=None)` samples that same model through Gymnasium.
+It exposes `Discrete` state/action spaces, `reset`, `step`, `render` and `close`.
+Policies, Models and Learners stay outside the environment.
+
+```python
+from modular_rl.data import Transition
+from modular_rl.environment import make_dlfs4_gridworld_env
+
+env = make_dlfs4_gridworld_env(render_mode="ansi", max_episode_steps=200)
+try:
+    observation, info = env.reset(seed=42, options={"start_state": 7})
+    action = 0  # Or int(model.act(observation).action.item()).
+    next_observation, reward, terminated, truncated, info = env.step(action)
+    transition = Transition(observation, action, reward, next_observation, terminated, truncated)
+    print(env.render())
+    # TD/Q: learner.learn(transition.to_batch()); continue until either flag.
+finally:
+    env.close()
+```
+
+`make_sutton_gridworld_env()` samples a nonterminal start uniformly and defaults
+to a 10,000-step `TimeLimit`. `make_dlfs4_gridworld_env()` starts at the book's
+fixed state 7 and defaults to 2,000 steps. Both accept `render_mode` and
+`max_episode_steps=None` to omit the wrapper. `env.unwrapped.mdp` exposes the
+known kernel explicitly for DP. Original `sutton_gridworld()` and
+`dlfs4_gridworld()` still return `TabularMDP`.
+
+Seed the first reset, then use `reset()` to continue the environment's own RNG
+for starts/outcomes. Policy RNG is separate; `action_space.sample()` requires
+`action_space.seed(...)` for reproducibility. Options override the start for one
+reset only. Natural termination requires reset before another step. The base Env
+never auto-resets or truncates; external `TimeLimit` owns the cap. Callers reset
+after **either** boundary and retain the actual final observation. At a natural
+ending exactly on the cap, official TimeLimit can report both flags True.
+`ansi` returns readable state IDs; `human` prints them on reset/step/render.
+
+For tabular MC, `collect_episode(env, select_action, seed=None, options=None)`
+collects an ordered, owned `Episode` using an external action callback. It stops
+at either flag and leaves truncated fragments explicit. MC rejects truncated-only
+episodes; TD/Q bootstrap unless terminated. FrozenLake and CartPole use the same
+Gymnasium reset/step API, with their existing learning loops unchanged.
 
 ## Input / output contracts
 
@@ -154,7 +203,7 @@ episode boundaries and Q-table changes, and closes the environment in finally.
 It converts environment rewards to float before creating Transition while
 preserving terminated/truncated independently. Math is checked in deterministic
 unit tests; sparse-reward evaluation success is reported without a test threshold.
-FrozenLake smoke tests run when the optional Gymnasium dependency is installed.
+FrozenLake smoke tests use the required Gymnasium dependency.
 
 `DQNLearner(online_model, target_model, optimizer, target_generator, update_rule)`
 uses the same external `learn(batch)` entry point. It gathers one discrete Q
@@ -422,11 +471,13 @@ It never queries an MDP or chooses the behavior policy. The final next state is
 not another visit. Save its `visit_counts` separately alongside Model.state_dict,
 with the same gamma, visit mode and policy when resuming.
 
+New examples collect with `make_sutton_gridworld_env()` and
+`collect_episode(env, select_action, seed=...)`. Environment starts/outcomes use
+seed; the external policy RNG uses seed+1. The unchanged
 `TabularEpisodeSampler(mdp, policy, seed=...).sample(start_state, max_steps=...)`
-owns a NumPy Generator and samples both actions and joint outcomes. A terminal
-start raises without taking a step. A cutoff is explicitly truncated; the learner
-rejects truncated-only/open episodes. The example aborts at a cutoff instead of
-silently learning a partial return or selecting only completed short episodes.
+API remains available for compatibility. Both paths preserve explicit cutoffs;
+the example aborts at a truncated-only episode instead of silently learning a
+partial return or selecting only completed short episodes.
 
 ```bash
 python -m examples.gridworld_mc
@@ -435,9 +486,12 @@ python -m examples.gridworld_mc --episodes 100 --seed 7
 
 Both visit modes receive identical episodes under the uniform policy. The example
 prints episode/step totals, state visit/update counts, estimated V and DP-reference
-RMSE over the 14 nonterminal states. With seed=7 and 20,000 episodes, RMSE was
+RMSE over the 14 nonterminal states. In the earlier legacy Sampler experiment
+with seed=7 and 20,000 episodes, RMSE was
 0.199544 (first) and 0.283310 (every), over 365,007 environment steps. These are
-experiment results; tests do not require monotonically decreasing stochastic RMSE.
+historical results: the Gymnasium path has different RNG draw order and is not
+expected to generate the same episodes for that seed. Tests check distributions,
+mathematics and repeatability without requiring monotonically decreasing RMSE.
 See [Architecture](docs/ARCHITECTURE.md) for contracts and checkpoint responsibilities.
 
 ## Tabular TD(0) prediction and DP/MC comparison
@@ -468,6 +522,11 @@ states, episode/step checkpoints, alpha, seed and final RMSE mean/std across see
 The Python `train_and_compare()` result also exposes these checkpoints as `history`.
 Constant-alpha TD retains sampling variability; no ordering of MC/TD performance
 or monotonic RMSE is imposed by tests. DP remains pure NumPy Bellman evaluation.
+
+Gymnasium-path verification with seed=7 and 1,000 episodes collected 17,609
+steps with no cutoff. Both MC and TD examples produced the same MC values:
+first RMSE=0.758770, every=0.600755. TD RMSE was 9.454563 / 1.738354 / 1.741590
+for alpha=0.01 / 0.05 / 0.1. These are measured results, not performance thresholds.
 
 ## Jupyter Notebooks — Deep Learning from Scratch 4
 

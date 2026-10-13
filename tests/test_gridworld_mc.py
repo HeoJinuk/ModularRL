@@ -9,7 +9,6 @@ import pytest
 
 from examples.gridworld_mc import train_and_compare
 from modular_rl.data import Episode, Transition
-from modular_rl.environment import TabularEpisodeSampler
 from modular_rl.learner import MCPredictionLearner
 
 
@@ -50,7 +49,7 @@ def test_experiment_aborts_on_a_truncated_episode_before_either_learner_updates(
     def forbidden(*args, **kwargs):
         raise AssertionError("Truncation must not be learned or silently discarded")
 
-    monkeypatch.setattr(TabularEpisodeSampler, "sample", truncate)
+    monkeypatch.setattr("examples.gridworld_mc.collect_episode", truncate)
     monkeypatch.setattr(MCPredictionLearner, "learn", forbidden)
     with pytest.raises(RuntimeError, match="truncated.*MC did not learn"):
         train_and_compare(episodes=1, log_every=0)

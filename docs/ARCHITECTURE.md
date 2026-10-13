@@ -469,8 +469,8 @@ assert model.estimator.q_table[0, 0].item() == 9.5
 
 ### FrozenLake 예제 실행
 
-프로젝트 루트에서 Gymnasium을 core 의존성이 아닌 `examples` extra로 설치한다. 렌더링하지 않으므로
-pygame 등의 GUI 의존성은 필요하지 않다.
+Gymnasium은 실행 환경의 표준 API이므로 필수 의존성이다. 기존 `examples` extra 설치 명령은
+호환성을 위해 계속 허용한다. 렌더링하지 않으므로 pygame 등의 GUI 의존성은 필요하지 않다.
 
 ```bash
 python -m pip install -e ".[examples]"
@@ -495,7 +495,7 @@ Buffer를 저장하거나 학습하지 않는다. 학습 전후 동일한 평가
 6 step으로 변했다. Q-table 64개 항목 중 35개가 변경됐고 최대 절대 변화량은 1.0이었다.
 이 성공률은 보고용 실험 결과이며 단위 테스트 합격 기준이 아니다. 수학적 정확성은
 결정적인 Bellman/종료/중복 target 테스트로, 실제 환경 루프는 짧은 실행·seed 재현·TimeLimit
-처리·환경 close 테스트로 검증한다. Gymnasium이 없으면 해당 smoke 테스트만 skip한다.
+처리·환경 close 테스트로 검증한다. 기본 설치에도 Gymnasium이 포함된다.
 
 ### DQNLearner와 실제로 겹치는 코드
 
@@ -627,7 +627,7 @@ finally에서 정리한다. reward, epsilon, loss, signed/absolute TD Error 통�
 결정적 테스트는 Bellman/gather/종료 mask, Online gradient·Optimizer 호출, Target 불변성,
 모든 Buffer 동기화, 반환 detach와 Model/Optimizer state 복원을 확인한다. 짧은 실제 환경
 Smoke Test는 Warm-up·동기화 주기·실제 final observation·seed 재현성·환경 종료를 확인한다.
-Gymnasium이 없으면 환경 Smoke Test만, CUDA가 없으면 CUDA 검사만 skip한다.
+기본 설치에도 Gymnasium이 포함되며, CUDA가 없으면 CUDA 검사만 skip한다.
 
 Double DQN의 변경 지점은 no_grad Bootstrap 선택 경로다. Online next Q의 argmax 행동을
 Target next Q에서 gather해 next_value로 전달하면 된다. 기존 TargetGenerator,
@@ -770,11 +770,78 @@ max Q Bootstrap은 고정 Policy의 V_pi 평가와 목적이 다르므로 이를
 Phase 1의 DP는 sampling과 독립적이다. Phase 2의 Episode Sampler/MC Learner와
 Phase 3의 TD Prediction Learner는 아래에 기술하며 Dyna용 인터페이스는 아직 구현하지 않는다.
 
+## Gymnasium 실행 환경
+
+`TabularMDP`는 알려진 유한 MDP의 수학적 데이터, `TabularEnv(gymnasium.Env)`는 그 데이터로
+실제 전이를 샘플링하는 실행 환경이다. DP는 모든 Outcome의 확률 가중합을 계산하며
+환경의 step을 반복하지 않는다. MC/TD/Q-learning은 Gymnasium API에서 관측한 경험만
+Learner에 전달한다. FrozenLake·CartPole도 같은 reset/step 계약을 사용한다.
+추론용 `model.Model`과 알려진 MDP를 혼동하지 않으며 기존 Model/Estimator/Learner 계약은 유지한다.
+
+| 공개 API | 책임 |
+|---|---|
+| `TabularEnv(mdp, *, start_state=None, render_mode=None)` | Discrete 관측·행동 공간, MDP 확률에 따른 Outcome 샘플링 |
+| `reset(*, seed=None, options=None) -> (int, dict)` | 시작 상태와 환경 RNG 초기화, options의 start_state는 이번 reset만 적용 |
+| `step(action) -> (int, float, bool, bool, dict)` | next state·reward·자연 종료 반환; 기본 Env의 truncated는 False |
+| `render()` / `close()` | ansi 상태 ID 문자열 / human 출력, 멱등 close; reset으로 재사용 가능 |
+| `make_sutton_gridworld_env(*, render_mode=None, max_episode_steps=10000)` | 비종료 상태 균등 시작 + 공식 TimeLimit |
+| `make_dlfs4_gridworld_env(*, render_mode=None, max_episode_steps=2000)` | 교재 고정 시작 ID 7 + 공식 TimeLimit |
+| `collect_episode(env, select_action, *, seed=None, options=None) -> Episode` | 외부 행동 callback으로 시간순 scalar State/Action 경험 수집 |
+
+두 생성 함수는 단순한 환경 구성 함수이며 별도 Factory/Registry 계층이 아니다.
+max_episode_steps=None이면 기본 Env를 반환한다. `env.unwrapped.mdp`로 알려진 kernel을
+명시적으로 참조할 수 있다. 기존 sutton_gridworld()/dlfs4_gridworld()는 계속 TabularMDP를 반환한다.
+
+```python
+from modular_rl.data import Transition
+from modular_rl.environment import make_dlfs4_gridworld_env
+
+env = make_dlfs4_gridworld_env(max_episode_steps=200)
+try:
+    observation, info = env.reset(seed=42, options={"start_state": 7})
+    while True:
+        action = int(model.act(observation).action.item())
+        next_observation, reward, terminated, truncated, info = env.step(action)
+        transition = Transition(observation, action, reward, next_observation, terminated, truncated)
+        learner.learn(transition.to_batch())
+        observation = next_observation
+        if terminated or truncated:
+            break
+finally:
+    env.close()
+```
+
+환경은 `super().reset(seed=seed)`와 `self.np_random`으로 시작 상태 및 joint Outcome만 선택한다.
+첫 reset에 seed를 전달하고 이후 None으로 같은 stream을 이어간다. 행동 선택은 외부 NumPy
+Generator나 Model의 PyTorch RNG를 사용한다. action_space.sample()을 쓰면 별도로
+action_space.seed(...)를 설정한다. 환경이 정책·Model·Learner·추가 RNG를 소유하지 않으며
+global NumPy RNG를 변경하지 않는다. 실험 재개에는 환경/행동 RNG 상태도 함께 필요하다.
+
+자연 종료는 Outcome의 terminated 또는 선언된 terminal 상태 진입이다. 알려진 terminal에서
+reset 시작을 거절하며 step 전 reset·자연 종료 후 reset을 요구한다(ResetNeeded).
+기본 Env는 자동 reset이나 자체 step cap이 없다. 외부 TimeLimit의 truncation은 기본 Env가
+알 수 없으므로 호출자는 어느 flag든 True이면 reset해야 한다. 제한에 도달한 자연 종료에서는
+공식 TimeLimit이 두 flag를 모두 True로 반환할 수 있다.
+최종 관측은 reset 첫 관측으로 바꾸지 않는다. TD/Q는 terminated에서만 Bootstrap을 중단하고
+MC는 truncated-only Episode를 거절한다. info 전체를 경험에 저장하지 않는다.
+
+collect_episode는 이산 scalar 관측·행동을 사용하는 TabularEnv/FrozenLake 같은 환경에 한정한다.
+환경의 reset/step만 호출하며 정책·학습·추가 RNG·중복 길이 제한을 포함하지 않는다.
+반환 Episode가 기존 owned snapshot 계약을 적용한다. 범용 Trajectory/Runner는 추가하지 않는다.
+
+Gymnasium은 필수 의존성(`gymnasium>=1.0`)이며 `examples=[]`는 이전 설치 명령과의 호환성만
+남긴다. Matplotlib/Jupyter 등은 선택적 notebooks extra다. 공식
+[환경 API](https://gymnasium.farama.org/api/env/)와
+[TimeLimit](https://gymnasium.farama.org/api/wrappers/misc_wrappers/) 의미를 따른다.
+검증은 unwrapped TabularEnv의 공식 check_env와 wrapper의 별도 boundary 테스트를 구분한다.
+Sutton/DLFS4의 모든 비종료 전이, 시작·행동·Outcome 분포와 재실행 결정성을 검사한다.
+기존 Sampler와 RNG 사용 순서가 다르므로 동일 seed의 Episode 자체가 같다고 가정하지 않는다.
+
 ## Tabular Monte Carlo Prediction Phase 2
 
 Sutton & Barto의 [Chapter 5, Monte Carlo Prediction](https://www.incompleteideas.net/book/bookdraft2018mar21.pdf)을
 참고한다. DP는 알려진 확률 모델의 모든 결과를 합산하고, MC는 고정 정책에서 수집한 실제
-완료 Episode의 Return을 평균한다. 알려진 MDP를 사용하는 Sampler와 그 Episode만 보는
+완료 Episode의 Return을 평균한다. 환경에서 경험을 수집하는 코드와 그 Episode만 보는
 Learner를 분리한다. MC Control, Off-policy Importance Sampling, Function Approximation은
 이번 범위에 포함하지 않는다.
 
@@ -874,11 +941,16 @@ restored.visit_counts.copy_(saved["visit_counts"])
 torch.testing.assert_close(restored.visit_counts, learner.visit_counts)
 ```
 
-고정된 정책도 같은 것으로 복원해야 한다. 완전한 실험 재현에는 현재 Episode 번호, 외부 시작
-상태 RNG와 `sampler.rng.bit_generator.state`를 별도로 저장한다. Policy 또는 gamma를 바꾸면
+고정된 정책도 같은 것으로 복원해야 한다. 완전한 실험 재현에는 현재 Episode 번호,
+`env.unwrapped.np_random.bit_generator.state`와 외부 행동 RNG를 별도로 저장한다.
+호환 Sampler 경로에서는 기존 시작 RNG와 `sampler.rng.bit_generator.state`가 해당한다. Policy 또는 gamma를 바꾸면
 이전 Return 평균의 추정 대상이 달라지므로 기존 학습과 섞지 않는다. Checkpoint Framework는 추가하지 않는다.
 
 ### 외부 Episode Sampling과 Truncation 정책
+
+현재 예제·Notebook은 `collect_episode(env, select_action, seed=...)`를 사용한다. 정책 확률에
+따른 행동 callback과 환경 RNG를 분리하며 공식 TimeLimit이 Episode 경계를 보고한다.
+아래 TabularEpisodeSampler의 공개 API와 이전 경계 동작은 호환성을 위해 수정하지 않는다.
 
 `TabularEpisodeSampler(mdp, policy, *, seed=None).sample(start_state, *, max_steps=10000)`는
 owned Policy float64 `(S,A)`와 독립 NumPy Generator를 사용한다. Policy shape·확률합을
@@ -905,17 +977,18 @@ python -m examples.gridworld_mc
 python -m examples.gridworld_mc --episodes 100 --seed 7
 ```
 
-`examples/gridworld_mc.py`는 기존 sutton_gridworld(), uniform_policy(), policy_evaluation()을
-재사용한다. gamma=1이며 독립 시작 상태 RNG(seed=7)가 14개 비종료 상태 중 균등하게 선택하고
-Sampler RNG는 seed=8이다. 동일 Episode를 First/Every Learner에 전달한다. 예제 출력은
+`examples/gridworld_mc.py`는 make_sutton_gridworld_env(), collect_episode(), uniform_policy(),
+policy_evaluation()을 재사용한다. gamma=1이며 환경 RNG(seed=7)가 14개 비종료 상태 중
+균등 시작과 Outcome을 선택하고 외부 행동 RNG는 seed=8이다. 동일 Episode를 First/Every Learner에 전달한다. 예제 출력은
 Episode 수, 전체 환경 step, 시작 횟수, 상태별 update count, V, DP 대비 RMSE다.
 RMSE는 terminal 0/15를 제외한다. 전체 계산은 float64이며 default max_steps=10000이다.
 
-20,000 완료 Episode, 365,007 step에서 초기 RMSE=18.516402였고 First-visit=.199544,
+이전 Sampler 경로의 검증 기록: 20,000 완료 Episode, 365,007 step에서 초기 RMSE=18.516402였고 First-visit=.199544,
 Every-visit=.283310이었다. 모든 비종료 상태에 sample이 있었고 terminal count/V는 0이었다.
 5,000/10,000/15,000 Episode의 RMSE는 First=.621222/.284128/.231667,
 Every=.619912/.295867/.240866이었다. 마지막 Every RMSE는 이전 구간보다 커졌지만 DP값에
-통계적으로 접근했다. 특정 Seed의 단조 감소나 전체 실험 RMSE 임계값을 pytest 합격 조건으로 삼지 않는다.
+통계적으로 접근했다. 이 수치를 새로운 Gymnasium RNG 경로의 결과로 간주하지 않는다.
+특정 Seed의 단조 감소나 전체 실험 RMSE 임계값을 pytest 합격 조건으로 삼지 않는다.
 결정적 테스트는 반복 상태·Return·평균·Count·경계·저장 복원을, 통계 테스트는 고정 Seed의
 행동/Outcome 빈도와 이론 확률을, 짧은 실험 테스트는 실행·RMSE 정의·재현성을 확인한다.
 
@@ -991,9 +1064,9 @@ python -m examples.gridworld_td --episodes 5000 --seeds 7 11 19 --alphas .01 .05
 python -m examples.gridworld_td --episodes 20 --log-every 5
 ```
 
-`examples/gridworld_td.py`는 기존 MC 예제를 변경하지 않고 sutton_gridworld(), uniform_policy(),
-TabularEpisodeSampler와 policy_evaluation()을 재사용한다. gamma=1, 시작 상태는 14개 비종료
-상태에서 균등 추출한다. 시작 RNG는 seed, Sampler RNG는 seed+1이며 기존 MC와 동일하다.
+`examples/gridworld_td.py`는 MC와 같은 make_sutton_gridworld_env(), collect_episode(),
+uniform_policy(), policy_evaluation()을 재사용한다. gamma=1, 시작 상태는 14개 비종료
+상태에서 균등 추출한다. 환경 RNG는 seed, 행동 RNG는 seed+1이며 현재 MC 예제와 동일하다.
 각 Seed에서 두 MC 및 세 alpha의 TD Model을 독립적으로 0에서 시작한다.
 
 MC는 같은 완료 Episode를 전체 입력으로 받고 TD는 그 Episode의 Transition을 시간 순서대로
@@ -1009,7 +1082,7 @@ RMSE 평균·표준편차는 ddof=0이다. 같은 경험은 방법 수와 관계
 Constant alpha TD는 표본 변동이 남을 수 있다. 특정 alpha가 MC보다 우수하거나 한 Seed의
 RMSE가 매 checkpoint 감소해야 한다는 테스트는 두지 않는다.
 
-검증 실행은 Seed마다 5,000 완료 Episode, 초기 V=0, float64, gamma=1이었다.
+이전 Sampler 경로의 검증 실행은 Seed마다 5,000 완료 Episode, 초기 V=0, float64, gamma=1이었다.
 초기 RMSE는 18.516402이며 아래는 각 Seed의 최종 RMSE다. 세 Seed의 실제 환경 step 합은
 274,415이고 MC/TD 모두 각 Seed 안에서 동일 Episode를 사용했다. Cutoff는 없었다.
 
@@ -1023,18 +1096,24 @@ RMSE가 매 checkpoint 감소해야 한다는 테스트는 두지 않는다.
 예를 들어 seed=7, alpha=.05의 1,000/2,000/3,000/4,000/5,000 Episode RMSE는
 1.237541/1.155240/.856019/2.237295/1.753061이었다. 해당 checkpoint의 step은
 18,398/37,122/54,592/71,943/89,019다. 이 실행의 순위와 오르내림은 관측 결과이며
-MC 또는 TD의 일반적인 성능 우위로 해석하지 않는다.
+MC 또는 TD의 일반적인 성능 우위로 해석하지 않는다. Gymnasium 경로의 표본과 수치는 달라질 수 있다.
+
+현재 Gymnasium 경로의 검증(seed=7, gamma=1, 1,000 완료 Episode)은 17,609 step,
+cutoff 0이었다. First MC RMSE=.758770, Every MC=.600755이고 TD alpha=.01/.05/.1은
+각각 9.454563/1.738354/1.741590이었다. MC 단독 예제와 비교 예제의 MC 값·Count·Step은
+같았다. 새 경로 자체의 seed 재실행, 분포 및 결정적인 갱신 수식으로 정확성을 검증한다.
 
 ### 공통 데이터와 실제 중복
 
 | 공통 요소 | 사용 위치 |
 |---|---|
-| TabularMDP / TransitionOutcome, Policy `(S,A)` | DP 기대값과 MC/TD 외부 Sampler가 공유 |
+| TabularMDP / TransitionOutcome, Policy `(S,A)` | DP 기대값과 Gymnasium 환경·외부 행동 callback이 공유 |
 | State index, reward, 종료 flag와 실제 next state | 경험 Transition/Episode/TransitionBatch가 보존 |
 | 같은 reward/gamma/terminal 의미, 고정 정책 V_pi | 세 방식의 비교 기준 |
 | TabularVEstimator / Model | MC와 TD의 값 저장·추론·checkpoint; DP는 NumPy V 유지 |
 
-비교 예제와 기존 MC 예제의 시작 RNG 설정, 비종료 상태 목록, Model 초기화와 RMSE 계산은
+Episode 수집은 공통 collect_episode로 처리한다. 비교 예제와 MC 예제의 행동 RNG 설정,
+비종료 상태 목록, Model 초기화와 RMSE 계산은
 작게 반복된다. TD0 Learner와 TabularQLearner는 Batch 준비 및 reward/flag/index 검증이
 겹치지만 Bootstrap 선택과 Rule 호출이 다르다. 이 정도의 반복을 공통 Base나 통합 Framework로
 숨기지 않는다. DP Bellman 합산, MC 전체 Return 평균, TD 한 단계 Bootstrap은 별도 계산으로
@@ -1051,11 +1130,12 @@ SARSA는 수집 시 실제 선택한 next_action을 명시적으로 전달하는
 MC Control/Off-policy MC Control, SARSA/Off-policy SARSA는 미구현으로 명시하며
 [원본 실습 대응표](../notebooks/dlfs4/README.md)에 각 파일·설정·지원 상태·차이를 기록한다.
 
-`environment/dlfs4_gridworld.py`는 3×4 교재 환경의 알려진 TabularMDP만 만든다.
+`environment/dlfs4_gridworld.py`는 3×4 교재 TabularMDP와 그 Gymnasium 실행 환경 생성 함수를 제공한다.
 벽 (1,1)을 제외한 11개 State ID와 좌표 tuple을 사용하며 시작은 (2,0), 목표는 (0,3)이다.
 목표 진입 +1·종료, (1,3) 진입 -1·계속, 다른 진입 0이며 벽·경계는 제자리다.
-기존 Sutton 환경과 다르다. Sampling은 기존 TabularEpisodeSampler 또는 명시적인
-결정적 환경 루프, 표시는 별도의 작은 notebooks/dlfs4/plotting.py가 담당한다.
+기존 Sutton 환경과 다르다. MC/TD Sampling은 collect_episode의 reset/step,
+Q-learning은 명시적인 Gymnasium 환경 루프를 사용한다. 표시는 별도의 작은
+notebooks/dlfs4/plotting.py가 담당한다. DP의 NumPy 계산과 교재 전이 kernel은 변경하지 않는다.
 
 `Transition.to_batch() -> TransitionBatch`는 모든 present field를 dtype 유지·graph 없는
 복사로 만들고 앞에 B=1을 추가한다. Tensor는 원래 device를 보존하고 Python/NumPy는 CPU다.
@@ -1069,6 +1149,11 @@ Notebook의 기본 MC/TD는 γ=.9, 고정 시작·Uniform Policy·1,000 Episode�
 Runner 구현으로 해석하지 않는다. Q-learning은 α=.8, ε=.1, 1,000 Episode와 명시적
 환경 루프를 사용한다. Kernel 실행·Matplotlib·nbformat/nbclient는 선택적 notebooks extra다.
 Run All 두 번의 실제 출력 비교는 같은 Kernel에서 수행하며 core API의 부재를 우회하지 않는다.
+
+Gymnasium 경로의 Notebook Run All 검증에서 MC/TD는 동일한 1,000 Episode, 45,188 step을
+사용했다. 비종료 상태 DP 대비 RMSE는 First MC=.0306, Every MC=.0317, TD=.0239였고
+Q-learning은 cutoff 0, 마지막 100 Episode 평균 보상 1.0, Greedy 5번 이동으로 목표에 도달했다.
+세 Notebook의 텍스트·수치·13개 PNG 출력이 같은 Kernel의 두 실행에서 일치했다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 

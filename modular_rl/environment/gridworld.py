@@ -1,6 +1,9 @@
 """Sutton & Barto Example 4.1 with corner terminals indexed as 0 and 15."""
 
+from gymnasium.wrappers import TimeLimit
+
 from modular_rl.data.mdp import TabularMDP, TransitionOutcome
+from modular_rl.environment.tabular_env import TabularEnv
 
 GRIDWORLD_ACTIONS = ("up", "down", "left", "right")
 
@@ -28,3 +31,13 @@ def sutton_gridworld() -> TabularMDP:
             actions.append((outcome,))
         transitions.append(tuple(actions))
     return TabularMDP(16, 4, tuple(transitions), terminal_states)
+
+
+def make_sutton_gridworld_env(*, render_mode=None, max_episode_steps=10_000):
+    """Execute the unchanged 4x4 kernel; reset samples a nonterminal start.
+
+    TimeLimit bounds episodes by default. Pass None for the raw TabularEnv.
+    Access the shared mathematical model with env.unwrapped.mdp.
+    """
+    env = TabularEnv(sutton_gridworld(), render_mode=render_mode)
+    return env if max_episode_steps is None else TimeLimit(env, max_episode_steps=max_episode_steps)

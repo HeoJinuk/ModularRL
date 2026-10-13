@@ -11,7 +11,10 @@
     plotting and sampling are separate. Sutton's 4x4 Gridworld is unchanged.
 """
 
+from gymnasium.wrappers import TimeLimit
+
 from modular_rl.data import TabularMDP, TransitionOutcome
+from modular_rl.environment.tabular_env import TabularEnv
 
 DLFS4_GRID_SHAPE = (3, 4)
 DLFS4_STATES = tuple((row, col) for row in range(3) for col in range(4) if (row, col) != (1, 1))
@@ -42,3 +45,13 @@ def dlfs4_gridworld() -> TabularMDP:
             actions.append((outcome,))
         transitions.append(tuple(actions))
     return TabularMDP(len(DLFS4_STATES), 4, tuple(transitions), (goal,))
+
+
+def make_dlfs4_gridworld_env(*, render_mode=None, max_episode_steps=2000):
+    """Execute the unchanged book kernel; reset starts at coordinate (2,0).
+
+    TimeLimit bounds episodes by default. Pass None for the raw TabularEnv.
+    reset(options={'start_state': id}) can override the configured start.
+    """
+    env = TabularEnv(dlfs4_gridworld(), start_state=DLFS4_START_STATE, render_mode=render_mode)
+    return env if max_episode_steps is None else TimeLimit(env, max_episode_steps=max_episode_steps)

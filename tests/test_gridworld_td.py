@@ -10,7 +10,6 @@ import pytest
 from examples.gridworld_mc import train_and_compare as mc_comparison
 from examples.gridworld_td import train_and_compare
 from modular_rl.data import Episode, Transition
-from modular_rl.environment import TabularEpisodeSampler
 from modular_rl.learner import MCPredictionLearner, TabularTD0PredictionLearner
 
 
@@ -51,7 +50,7 @@ def test_each_td_learner_gets_same_episode_in_chronological_single_transition_ca
                                                               batch.next_observation.item(), batch.terminated.item()))
         return td_learn(self, batch)
 
-    monkeypatch.setattr(TabularEpisodeSampler, "sample", lambda *args, **kwargs: episode)
+    monkeypatch.setattr("examples.gridworld_td.collect_episode", lambda *args, **kwargs: episode)
     monkeypatch.setattr(MCPredictionLearner, "learn", record_mc)
     monkeypatch.setattr(TabularTD0PredictionLearner, "learn", record_td)
     _, results = train_and_compare(episodes=1, log_every=0)
@@ -87,7 +86,7 @@ def test_truncated_episode_aborts_before_any_mc_or_td_update(monkeypatch):
         raise AssertionError("No learner may process a censored comparison episode")
 
     episode = Episode((Transition(1, 0, -1., 1, False, True),))
-    monkeypatch.setattr(TabularEpisodeSampler, "sample", lambda *args, **kwargs: episode)
+    monkeypatch.setattr("examples.gridworld_td.collect_episode", lambda *args, **kwargs: episode)
     monkeypatch.setattr(MCPredictionLearner, "learn", forbidden)
     monkeypatch.setattr(TabularTD0PredictionLearner, "learn", forbidden)
     with pytest.raises(RuntimeError, match="truncated.*no learner processed"):

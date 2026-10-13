@@ -45,7 +45,7 @@
 - `component/buffer/`, `component/target_generator/{base,td0,monte_carlo}.py`
 - `component/update_rule/{tabular,td_loss}.py`
 - `learner/{__init__,tabular_q,dqn,mc_prediction,tabular_td0}.py`
-- `dp/{__init__,algorithms}.py`, `environment/{__init__,gridworld,episode_sampler}.py`
+- `dp/{__init__,algorithms}.py`, `environment/{__init__,gridworld,dlfs4_gridworld,episode_sampler,tabular_env,episode_collection}.py`
 
 ## TargetGenerator 계약
 - TD0TargetGenerator는 외부에서 계산한 reward, next_value, terminated Tensor로 target 수식만 계산한다. Model, Buffer, Optimizer를 참조하지 않는다.
@@ -62,7 +62,7 @@
 - `TabularQLearner(model, target_generator, update_rule).learn(batch)`는 TabularQEstimator Model, TD0TargetGenerator와 TabularQUpdateRule을 조합한다. ActionSelector는 선택적이며 학습에 사용하지 않는다.
 - 각 입력 필드는 `(B,)`다. 정수 state/action indices를 long으로 정규화하고 Batch를 현재 q_table의 device·floating dtype에 맞춘다. Representation은 table state index를 보존해야 한다.
 - no_grad에서 다음 상태 Q의 action별 최댓값과 Batch target을 먼저 계산한 뒤 기존 UpdateRule로 갱신한다. 반환 signed TD error는 행 순서를 유지하고 graph가 없다. 수식을 Learner에 중복 구현하지 않는다.
-- Buffer 저장·샘플링, 환경 종료·reset과 실제 final observation 제공은 호출자 책임이다. Tabular에는 Optimizer가 없으며 기본 FrozenLake 예제는 Gymnasium의 선택적 examples 의존성을 사용한다.
+- Buffer 저장·샘플링, 환경 종료·reset과 실제 final observation 제공은 호출자 책임이다. Tabular에는 Optimizer가 없으며 FrozenLake 예제는 필수 Gymnasium 의존성을 사용한다.
 
 ## DQNLearner 계약
 - `DQNLearner(online_model, target_model, optimizer, target_generator, update_rule).learn(batch)`는 단일 Scalar Discrete Q `(B, A)`에서 선택 행동의 prediction `(B,)`을 gather하고, no_grad Target max Q로 TD0 target을 만든 뒤 기존 TDLossUpdateRule과 Optimizer를 실행한다. 반환 TDLossOutput의 signed td_error와 scalar loss는 detach된 업데이트 직전 값이다.
@@ -82,8 +82,15 @@
 - MonteCarloReturnGenerator는 floating rewards `(T,)`에서 역순으로 전체 Return을 계산한다. Bootstrap 없이 gradient를 보존하며 기존 TD BaseTargetGenerator 상속을 강제하지 않는다.
 - MCPredictionLearner(model, return_generator, visit_mode="first")는 TabularVEstimator table에 정방향 first/every visit을 선택하고 count 증가 후 `(G-V)/count`로 sample average를 갱신한다. learn 반환값은 전체 시간 순서 Returns `(T,)`, graph 없음이다.
 - terminated=True만 MC 학습을 허용한다. truncated-only와 열린 Episode는 거절하고 양쪽 flag가 True면 실제 종료가 확인된 것으로 처리한다. 최종 next_observation은 추가 방문이 아니다.
-- visit_counts는 Model.state_dict에 포함되지 않는 Learner의 long Tensor다. 재개 시 V-table과 Counts를 같은 gamma·visit_mode·정책으로 함께 복원한다. Sampler RNG와 시작 상태 RNG도 별도 학습 상태다.
-- TabularEpisodeSampler는 알려진 MDP와 고정 Policy로 외부 Episode를 수집한다. terminal 시작은 거절하고 max_steps 중단은 truncated로 표시한다. 기본 MC 예제는 잘린 Episode를 버리고 계속하는 대신 실험을 명시적으로 중단한다.
+- visit_counts는 Model.state_dict에 포함되지 않는 Learner의 long Tensor다. 재개 시 V-table과 Counts를 같은 gamma·visit_mode·정책으로 함께 복원한다. 환경 RNG와 행동 선택 RNG도 별도 학습 상태다.
+- TabularEpisodeSampler의 기존 공개 API와 RNG·종료 계약은 호환성을 위해 유지한다. 새 예제·Notebook은 Gymnasium 환경에서 collect_episode로 수집한다. 기본 MC 예제는 truncated-only Episode를 버리고 계속하는 대신 실험을 명시적으로 중단한다.
+
+## 실행 환경 계약
+- Gymnasium은 필수 의존성이며 examples extra는 설치 호환성만 유지한다. TabularMDP는 DP용 수학적 모델, TabularEnv는 그 kernel을 샘플링하는 gymnasium.Env다. Model/Learner API는 바꾸지 않는다.
+- reset/step/render/close와 Discrete spaces를 사용한다. 환경은 super().reset(seed=seed)와 np_random으로 시작·Outcome만 선택한다. Policy/Model/Learner와 행동 RNG는 호출자 책임이며 global NumPy RNG를 사용하지 않는다.
+- Sutton 시작은 비종료 상태 균등, DLFS4 시작은 고정 7이다. reset options의 start_state는 한 Episode에만 적용하며 terminal 시작은 거절한다. step 전 reset과 자연 종료 후 reset을 요구한다.
+- 최대 길이는 공식 TimeLimit을 사용한다. 호출자는 terminated 또는 truncated에서 reset하고 실제 final observation을 보존한다. 제한 시점의 자연 종료는 두 flag가 True일 수 있으며 이를 합치지 않는다.
+- collect_episode(env, select_action, seed=None, options=None)는 이산 State/Action Episode 수집만 담당한다. 정책·학습·추가 RNG를 소유하지 않는다. DP는 env.step을 반복하지 않고 원래 TabularMDP 기대값 계산을 유지한다.
 
 ## TD(0) Prediction 계약
 - `TabularTD0PredictionLearner(model, target_generator, update_rule).learn(batch)`는 TabularVEstimator Model과 기존 TD0TargetGenerator/TabularVUpdateRule을 조합한다. State/reward/종료 fields `(B,)`를 table device·dtype에 맞추며 action, policy, MDP, Buffer를 학습에 사용하지 않는다.
@@ -110,9 +117,9 @@
 ## 검증
 - 프로젝트 루트에서 `python -m pytest -q`로 계약 단위 테스트와 MLP 호환성 회귀 테스트를 모두 실행한다.
 - 예제 확인: `python -m examples.quickstart`.
-- FrozenLake 확인: examples extra 설치 후 `python -m examples.frozenlake_tabular_q`. 희소 보상 성공률을 단위 테스트 합격 조건으로 삼지 않는다.
+- FrozenLake 확인: `python -m examples.frozenlake_tabular_q`. 희소 보상 성공률을 단위 테스트 합격 조건으로 삼지 않는다.
 - CartPole 확인: `python -m examples.cartpole_dqn`. 전체 학습 성능은 예제로 보고하고 pytest에서는 결정적인 계산과 짧은 환경 Smoke Test를 검증한다.
-- Gridworld DP 확인: `python -m examples.gridworld_dp`. Gymnasium 없이 Sutton 참조 V와 Policy/Value Iteration의 최적 V를 검증한다.
+- Gridworld DP 확인: `python -m examples.gridworld_dp`. 환경 step 없이 NumPy로 Sutton 참조 V와 Policy/Value Iteration의 최적 V를 검증한다.
 - Gridworld MC 확인: `python -m examples.gridworld_mc`. 같은 Uniform Policy에서 First/Every-visit을 비교하고 14개 비종료 상태의 DP 대비 RMSE를 보고한다. RMSE의 단조 감소를 pytest 조건으로 사용하지 않는다.
 - Gridworld TD 비교: `python -m examples.gridworld_td --seeds 7 11 19`. 동일 경험에서 MC 두 모드와 TD alpha=.01/.05/.1을 비교한다. Episode/step별 RMSE와 Seed별 평균·표준편차를 보고하며 특정 알고리즘의 우위를 pytest 조건으로 삼지 않는다.
 
