@@ -7,7 +7,7 @@
 | Notebook | 실행 지원 |
 |---|---|
 | [04_dp_modularrl.ipynb](04_dp_modularrl.ipynb) | 두 상태 평가, GridWorld 표시, Policy Evaluation/Improvement/Iteration, Value Iteration |
-| [05_mc_modularrl.ipynb](05_mc_modularrl.ipynb) | 주사위 평균, MC Return, First/Every Prediction, On-policy MC Control·Q/정책·DP 비교, 확률변수 IS |
+| [05_mc_modularrl.ipynb](05_mc_modularrl.ipynb) | 주사위 평균, MC Return, On-policy Prediction/Control, Off-policy Prediction·Ordinary/Weighted IS·DP 비교 |
 | [06_td_modularrl.ipynb](06_td_modularrl.ipynb) | TD(0) Prediction, 동일 Episode MC 비교, Q-learning, Greedy 실행 |
 
 ## 확인한 원본
@@ -81,7 +81,8 @@ Episode를 학습하지 않고 비교를 중단한다. TD/Q는 terminated에서�
 | ch05/mc_eval.py: RandomAgent, Every-visit V | 05 §3–7 | make_dlfs4_gridworld_env, collect_episode, Episode, MonteCarloReturnGenerator, MCPredictionLearner | 실행 완료 | Every는 유지; First·Count·DP RMSE 추가; 원본 역순 평균 갱신 → 시간순 평균 |
 | ch05/mc_control.py: McAgent, Q와 ε-greedy 개선 | 05 §8 | Model.act, EpsilonGreedyActionSelector, TabularMCControlLearner, collect_episode | 실행 완료·확장 | 원본 고정 α=.1 → First-visit Sample Average; 10,000 → 1,000 Episode; γ=.9, ε=.1 유지 |
 | ch05/importance_sampling.py: 확률변수 평균/분산 | 05 §9 | NumPy 표본·ρ=π/b | 실행 완료 | Seed 명시; 이 통계 실습을 Off-policy RL 구현으로 부르지 않음 |
-| ch05/mc_control_offpolicy.py: McOffPolicyAgent | 05 §10 | 해당 Learner 없음 | 미구현 | γ=.9, α=.2, ε=.1; Return 보정·target/behavior 계약 필요 |
+| Off-policy Prediction 확장: 단일 확률변수 IS에서 Episode V 추정으로 확장 | 05 §10 | ActionOutput, collect_episode, OffPolicyMCPredictionLearner, policy_evaluation | 실행 완료·추가 | γ=.9, 고정 π, 기록 log b; Ordinary/Weighted·First/Every 지원, Control과 구분 |
+| ch05/mc_control_offpolicy.py: McOffPolicyAgent | 05 §11 | 해당 Control Learner 없음 | 미구현 | γ=.9, α=.2, ε=.1; V Prediction의 IS를 Q Control로 부르지 않음 |
 | ch06/td_eval.py: TdAgent | 06 §2–5 | collect_episode, TabularTD0PredictionLearner, TD0TargetGenerator, TabularVUpdateRule, Transition.to_batch | 실행 완료 | 원본 전이별 TD 유지; Gymnasium Episode는 먼저 수집 후 같은 순서 처리 |
 | ch06/sarsa.py: SarsaAgent, deque(maxlen=2) | 06 §6 | 해당 Learner 없음 | 미구현 | 실제 next_action 전달 계약 필요; max Q로 대신하지 않음 |
 | ch06/sarsa_off_policy.py: SarsaOffPolicyAgent | 06 §7 | 해당 Learner 없음 | 미구현 | 다음 행동·행동 확률의 수집 시점과 IS Target 보정 계약 필요 |
@@ -110,8 +111,20 @@ collect_episode에 전달하고 자연 종료 후 learn한다. 수집 중에는 
 새 Q를 사용한다. visit_counts `(S,A)`는 Model과 별도로 저장·복원한다. 평가에는 독립 환경과
 deterministic=True를 사용하며 Training Reward와 Greedy 평가의 길이·목표 도달을 구분한다.
 
+Off-policy Prediction은 `collect_episode(env, behavior_model.act)`로 ActionOutput과 sampling-time
+log b를 기록한다. 기존 int callback은 유지하며 log_prob=None이다. 수집 후 Q/epsilon 변경이나
+Tensor 재사용에도 기록은 유지된다. Target `(S,A)`는 고정하며 현재 행동 확률로 과거 b를 다시 계산하지 않는다.
+Ordinary는 ΣrhoG/N, Weighted는 ΣrhoG/Σrho다. 전체 suffix 비율에 현재 행동을 포함한다.
+Count·Weight 합·Weighted Return 합은 V-table과 함께 별도로 복원한다. 미관측 행동의 Coverage는
+기록만으로 확인할 수 없으므로 이 실험은 모든 행동의 b=1/4로 보장한다.
+직접 reset/step으로 Transition을 수집한 뒤 Episode로 묶는 경로도 지원한다.
+log_prob은 step 전에 detach·CPU clone하며, 전체 코드는
+[ARCHITECTURE.md](../../docs/ARCHITECTURE.md#sampling-시점의-behavior-확률)에 있다.
+
 ```bash
 python -m examples.gridworld_mc_control --episodes 1000 --seed 7 --epsilon 0.1
+python -m examples.gridworld_off_policy_mc --episodes 1000 --seeds 7 11 19
+python -m examples.gridworld_off_policy_mc --episodes 100 --seeds 7 --target-uniform
 ```
 
 `tests/test_dlfs4_notebooks.py`는 nbformat 검증 후 각 Notebook을 같은 Kernel에서 두 번
@@ -126,8 +139,8 @@ python -m pytest -q tests/test_dlfs4_notebooks.py
 ## 실행 결과
 
 선택적 Notebook 의존성을 설치한 Python 3.12에서 세 Notebook의 Run All을 같은 Kernel에서
-각각 두 번 실행했다. 모든 텍스트·숫자·PNG 출력이 일치했고, 기존 13개 그림을 보존해
-MC Control의 3개 그림을 추가했다.
+각각 두 번 실행했다. 모든 텍스트·숫자·PNG 출력이 일치했고, 기존 Prediction·Control·통계 실습을
+보존하면서 Off-policy Prediction의 V 비교·Episode/Step별 RMSE 그림 2개를 추가했다.
 실행 출력은 `.ipynb`에 저장되어 있으며 다음 값은 재현성 검증 결과다.
 
 | 실습 | 조건 | 결과 |
@@ -136,6 +149,7 @@ MC Control의 3개 그림을 추가했다.
 | MC | 환경 seed=7, 행동 seed=8, 1,000 Episode, 45,188 Step, γ=.9 | First RMSE=.0306, Every RMSE=.0317 |
 | MC/TD 동일 경험 비교 | 같은 Episode/Step, TD α=.01 | Every MC RMSE=.0317, TD RMSE=.0239 |
 | On-policy MC Control | 환경·PyTorch seed=7, 1,000 Episode, 5,672 Step, γ=.9, ε=.1, First-visit | 초기 Greedy는 20 Step cutoff; 학습 후 5 Step·+1로 목표 도달, 마지막 100 Training 평균 보상 1.0 |
+| Off-policy Prediction | 각 Seed 1,000 Episode, b=균등, π=(.3,.2,.2,.3), γ=.9 | Ordinary RMSE(seed7/11/19)=.055652/.047766/.046639; Weighted=.062241/.051419/.040393 |
 | Q-learning | seed=7, 1,000 Episode, γ=.9, α=.8, ε=.1 | Truncation 0, 마지막 100 Episode 평균 보상 1.0; Greedy 5번 이동으로 목표 도달 |
 
 이 수치는 해당 설정의 관측 결과다. 방문이 적은 상태·행동의 Q는 초기값으로 남을 수 있으며
@@ -143,13 +157,18 @@ MC Control의 3개 그림을 추가했다.
 동일 seed 결과를 재현하는 대신, 자체 재실행 결정성과 정책·전이 분포를 검증한다.
 계산은 반복 상태-행동 쌍·Sample Average·Count·Checkpoint·입력 경계의 결정적 테스트로,
 환경 실행은 짧은 재현성/종료 테스트로 검증한다. 단일 Seed의 학습 성공률로 합격을 판정하지 않는다.
-전체 pytest는 1,136 passed, 20 skipped(CUDA 미지원)였고 세 Notebook Run All 두 번,
-quickstart·DP/MC/TD/FrozenLake·CartPole Smoke Test도 통과했다. 기존 05 Notebook의
-코드 셀 10개 출력은 이전 commit과 정확히 일치했다.
+Behavior=Target 균등 예제(seed7, 100 Episode)는 모든 Weight가 1이고 두 방법의 값이 같다.
+단일 종료 전이 Reward=4, pi=.5, b=.25는 Ordinary V=8, Weighted V=4이며 여러 단계의
+비율 곱·반복 방문·Zero Weight·수치 오류·Checkpoint도 결정적 테스트로 검증한다.
+전체 pytest의 완료 기록은 1,218 passed, 25 skipped(CUDA 미지원)다. 중단 복구 시
+직접 reset/step 수집과 collect_episode의 동등성 테스트 2개를 추가한 뒤 관련 3개 테스트 파일을
+실행해 90 passed, 5 skipped를 확인했다. 이미 완료된 세 Notebook Run All 두 번의 결과는
+저장된 실행 산출물과 다시 대조했다. quickstart·DP/MC/TD/MC Control·FrozenLake·CartPole
+Smoke Test도 통과했으며, 기존 05 Notebook 코드 셀 15개의 출력은 이전 commit과 일치한다.
 
 ## 최소 확장 제안
 
 - MC Control 확장: 현재 Sample Average와 별도로 원본 고정 α 갱신·GLIE 등의 의미를 설계한다. 이번 구현에 이미 포함됐다고 간주하지 않는다.
 - SARSA: `learn(batch, next_actions)`처럼 실제 수집한 다음 행동을 전달하고 기존 TD0TargetGenerator/TabularQUpdateRule을 재사용한다. 현재 Transition 필드를 임의로 추가하지 않는다.
-- Off-policy: 어떤 시점의 π/b를 쓰는지, Ordinary/Weighted/Per-decision 보정과 gradient/저장 경계를 먼저 결정한다. 기존 log_prob만 있다고 완성되는 것은 아니다.
+- Off-policy 확장: 현재 full-trajectory V Prediction과 구분해 Q Control·Per-decision IS 등의 계약을 별도로 설계한다. Q 개선이나 SARSA가 구현됐다고 간주하지 않는다.
 - 제자리 DP: 필요할 때 별도 모드의 수치 의미를 설계한다. Notebook 단순화를 위해 지금 추가하지 않는다.

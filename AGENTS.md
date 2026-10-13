@@ -7,7 +7,7 @@
 - 새로운 추상 계층, 불필요한 Registry 또는 GUI 코드를 도입하지 않는다.
 
 ## 현재 저장소의 범위
-- 현재는 Model·경험 데이터(Transition/TransitionBatch/Episode)·ReplayBuffer·TD(0)/MC Return·Tabular TD 갱신·Neural TD Loss·TabularQLearner·DQNLearner·DP·MC/TD(0) Prediction·On-policy MC Control의 참조 구현이다. FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD 비교와 교재 Gridworld MC Control을 실행할 수 있다. Runner, Agent, SARSA, Off-policy MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
+- 현재는 Model·경험 데이터(Transition/TransitionBatch/Episode)·ReplayBuffer·TD(0)/MC Return·Tabular TD 갱신·Neural TD Loss·TabularQLearner·DQNLearner·DP·On/Off-policy MC Prediction·TD(0) Prediction·On-policy MC Control의 참조 구현이다. FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD 비교와 교재 Gridworld MC Prediction/Control을 실행할 수 있다. Runner, Agent, SARSA, Off-policy MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
 - 아래 Model 계약과 파일 배치는 이미 구현되어 있다. 기존 구현을 먼저 검토하고 중복 계층을 만들지 않는다.
 - 정수 입력은 기본적으로 torch.long으로 정규화한다. 정수로 저장된 연속 관측은 명시적인 InputAdapter dtype 설정을 사용한다.
 - Distributional 결과는 출력 payload에 담을 수 있으나, 해당 estimator/selector 및 학습 알고리즘이 구현된 것은 아니다.
@@ -44,7 +44,7 @@
 - `component/action_selector/`
 - `component/buffer/`, `component/target_generator/{base,td0,monte_carlo}.py`
 - `component/update_rule/{tabular,td_loss}.py`
-- `learner/{__init__,tabular_q,dqn,mc_prediction,mc_control,tabular_td0}.py`
+- `learner/{__init__,tabular_q,dqn,mc_prediction,mc_control,off_policy_mc_prediction,tabular_td0}.py`
 - `dp/{__init__,algorithms}.py`, `environment/{__init__,gridworld,dlfs4_gridworld,episode_sampler,tabular_env,episode_collection}.py`
 
 ## TargetGenerator 계약
@@ -95,7 +95,13 @@
 - reset/step/render/close와 Discrete spaces를 사용한다. 환경은 super().reset(seed=seed)와 np_random으로 시작·Outcome만 선택한다. Policy/Model/Learner와 행동 RNG는 호출자 책임이며 global NumPy RNG를 사용하지 않는다.
 - Sutton 시작은 비종료 상태 균등, DLFS4 시작은 고정 7이다. reset options의 start_state는 한 Episode에만 적용하며 terminal 시작은 거절한다. step 전 reset과 자연 종료 후 reset을 요구한다.
 - 최대 길이는 공식 TimeLimit을 사용한다. 호출자는 terminated 또는 truncated에서 reset하고 실제 final observation을 보존한다. 제한 시점의 자연 종료는 두 flag가 True일 수 있으며 이를 합치지 않는다.
-- collect_episode(env, select_action, seed=None, options=None)는 이산 State/Action Episode 수집만 담당한다. 정책·학습·추가 RNG를 소유하지 않는다. DP는 env.step을 반복하지 않고 원래 TabularMDP 기대값 계산을 유지한다.
+- collect_episode(env, select_action, seed=None, options=None)는 int 또는 ActionOutput callback을 받는다. ActionOutput의 log_prob은 선택 시점에 graph 없는 owned CPU Tensor로 step 전에 복사하며 int 경로는 None을 유지한다. 이산 State/Action 수집만 담당하고 정책·학습·추가 RNG를 소유하지 않는다. DP는 원래 TabularMDP 기대값 계산을 유지한다.
+
+## Off-policy MC Prediction 계약
+- OffPolicyMCPredictionLearner는 TabularVEstimator, 기존 Return Generator와 고정 Target Policy (S,A)를 사용한다. 선택 시점의 log b가 모든 전이에 있어야 하며 현재 Behavior Model/Q/epsilon으로 과거 확률을 재계산하지 않는다.
+- rho는 현재 행동부터 Episode 마지막 행동까지 pi/b의 곱이다. First/Every는 시간순 상태 방문이며 Ordinary는 sum(rho*G)/N, Weighted는 sum(rho*G)/sum(rho)다. Weight=0도 Count에 포함하고 누적 Weight=0이면 Weighted V는 유지한다.
+- Count(long), Weight 합·Weighted Return 합(float64)은 별도 (S,) 학습 상태다. Model과 고정 Target/gamma/method/visit_mode, RNG를 함께 복원한다. V dtype/device는 Model을 따르며 비유한 통계·표현 불가능한 Weight/Value는 Episode 갱신 전에 실패한다.
+- Coverage(pi>0 ⇒ b>0)는 호출자 책임이다. 선택 행동의 log_prob만으로 미관측 행동의 support를 검증할 수 없다. 학습기는 환경·Behavior Model을 소유하지 않고 Control/SARSA나 Per-decision IS를 구현하지 않는다.
 
 ## TD(0) Prediction 계약
 - `TabularTD0PredictionLearner(model, target_generator, update_rule).learn(batch)`는 TabularVEstimator Model과 기존 TD0TargetGenerator/TabularVUpdateRule을 조합한다. State/reward/종료 fields `(B,)`를 table device·dtype에 맞추며 action, policy, MDP, Buffer를 학습에 사용하지 않는다.
@@ -127,6 +133,7 @@
 - Gridworld DP 확인: `python -m examples.gridworld_dp`. 환경 step 없이 NumPy로 Sutton 참조 V와 Policy/Value Iteration의 최적 V를 검증한다.
 - Gridworld MC 확인: `python -m examples.gridworld_mc`. 같은 Uniform Policy에서 First/Every-visit을 비교하고 14개 비종료 상태의 DP 대비 RMSE를 보고한다. RMSE의 단조 감소를 pytest 조건으로 사용하지 않는다.
 - 교재 MC Control 확인: `python -m examples.gridworld_mc_control`. Training Reward와 Greedy 평가를 구분하고 DP 최적 5 Step과 비교한다. 확률적 성능을 단일 Seed 합격 조건으로 삼지 않는다.
+- Off-policy MC 확인: `python -m examples.gridworld_off_policy_mc --seeds 7 11 19`. 고정 Target의 DP 참조값과 Ordinary/Weighted IS를 비교한다. `--target-uniform`으로 b=pi의 Weight=1을 확인한다.
 - Gridworld TD 비교: `python -m examples.gridworld_td --seeds 7 11 19`. 동일 경험에서 MC 두 모드와 TD alpha=.01/.05/.1을 비교한다. Episode/step별 RMSE와 Seed별 평균·표준편차를 보고하며 특정 알고리즘의 우위를 pytest 조건으로 삼지 않는다.
 
 ## Git 작업 원칙

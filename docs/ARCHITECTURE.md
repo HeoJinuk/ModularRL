@@ -2,7 +2,7 @@
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
 ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·DQNLearner와
-Tabular DP, Monte Carlo/TD(0) Prediction 및 On-policy MC Control 참조 구현이다.
+Tabular DP, On/Off-policy Monte Carlo Prediction, TD(0) Prediction 및 On-policy MC Control 참조 구현이다.
 Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole, DP/MC/TD Prediction 비교는
 Sutton Gridworld, On-policy MC Control은 교재 3×4 Gridworld에서 실행할 수 있다. Runner, Agent,
 SARSA, Off-policy MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
@@ -828,6 +828,11 @@ MC는 truncated-only Episode를 거절한다. info 전체를 경험에 저장하
 collect_episode는 이산 scalar 관측·행동을 사용하는 TabularEnv/FrozenLake 같은 환경에 한정한다.
 환경의 reset/step만 호출하며 정책·학습·추가 RNG·중복 길이 제한을 포함하지 않는다.
 반환 Episode가 기존 owned snapshot 계약을 적용한다. 범용 Trajectory/Runner는 추가하지 않는다.
+기존 int callback은 log_prob=None을 유지한다. 추가된 ActionOutput callback은 scalar integer
+action Tensor를 환경 경계에서 Python action으로 바꾸고, log_prob을 선택 직후·step 전에
+detach/CPU/clone한다. Callback의 Tensor 재사용이나 수집 후 Q/epsilon 변경이 과거 확률을
+바꾸지 않는다. `collect_episode(env, behavior_model.act)`로 기존 Model 출력을 바로 기록한다.
+deterministic=True의 log_prob=None은 평가 경험으로 수집할 수 있지만 Off-policy IS에는 충분하지 않다.
 
 Gymnasium은 필수 의존성(`gymnasium>=1.0`)이며 `examples=[]`는 이전 설치 명령과의 호환성만
 남긴다. Matplotlib/Jupyter 등은 선택적 notebooks extra다. 공식
@@ -843,7 +848,7 @@ Sutton & Barto의 [Chapter 5, Monte Carlo Prediction](https://www.incompleteidea
 참고한다. DP는 알려진 확률 모델의 모든 결과를 합산하고, MC는 고정 정책에서 수집한 실제
 완료 Episode의 Return을 평균한다. 환경에서 경험을 수집하는 코드와 그 Episode만 보는
 Learner를 분리한다. 이 Prediction API는 V 추정만 담당하며 On-policy Q Control은 아래 별도
-Learner로 구현한다. Off-policy Importance Sampling과 Function Approximation은 아직 포함하지 않는다.
+Learner로 구현한다. Off-policy IS Prediction도 아래 별도 Learner로 기술한다. Function Approximation은 아직 포함하지 않는다.
 
 ### Episode와 Replay Batch
 
@@ -1086,9 +1091,150 @@ Count가 충분하다는 뜻은 아니며 단일 Seed의 성공률·길이를 py
 
 `05_mc_modularrl.ipynb`의 기존 Prediction 뒤에 On-policy MC Control 구성·학습·Q와 정책 표시,
 DP 비교를 추가한다. 원본 고정 alpha=.1/10,000 Episode와 달리 Sample Average/1,000 Episode다.
-Off-policy MC는 수집 시점 behavior 확률 보존과 보정 Return 계약을 먼저 정해야 한다.
-현재 int callback 수집기는 log_prob을 저장하지 않으며 On-policy Control에서는 필요하지 않다.
+Off-policy Prediction은 아래의 기록 확률·IS 통계로 구현한다. On-policy Control은 기존 int callback과
+log_prob=None을 계속 사용할 수 있다. Off-policy Control의 Q 갱신·정책 개선은 구현하지 않는다.
 SARSA는 실제 next_action과 선택 시점, terminated/truncated의 Bootstrap 의미를 명시한 입력 계약이 필요하다.
+
+## Off-policy Monte Carlo Prediction
+
+Behavior b로 생성한 경험에서 고정 Target π의 상태가치 Vπ를 추정한다.
+[Sutton & Barto Chapter 5 자료](https://people.cs.umass.edu/~barto/courses/cs687/Chapter%205.pdf)의
+Importance Sampling을 전체 Episode Return에 적용한다. Q Control·SARSA·Per-decision IS는 포함하지 않는다.
+Model/Estimator/ActionSelector/Data Class와 기존 MC Generator API는 변경하지 않는다.
+
+| 공개 API / 상태 | 계약 |
+|---|---|
+| `OffPolicyMCPredictionLearner(model, return_generator, target_policy, method="weighted", visit_mode="first")` | TabularVEstimator Model, 기존 MC Return Generator, 고정 `(S,A)` 확률 정책 |
+| `learn(episode: Episode) -> Tensor` | 전체 raw Return `(T,)`, no_grad, V-table dtype/device 유지 |
+| `target_policy` | 입력에서 복사한 owned float64 Tensor; shape·finite·확률 범위·행 합은 생성 시 검사 |
+| `visit_counts` | long `(S,)`, First/Every로 선택한 방문 수, rho=0도 포함 |
+| `weight_sums` | float64 `(S,)`, 선택 방문의 누적 Σrho |
+| `weighted_return_sums` | float64 `(S,)`, 선택 방문의 누적 Σ(rho*G) |
+
+Target 정책은 변경하지 않는다. Observation/action은 scalar 정수 범위 인덱스이며 long으로
+정규화한다. Reward/Return은 table dtype/device를 따른다. Learner는 Behavior Model·환경·Sampler·
+Optimizer를 받거나 현재 정책을 조회하지 않고, Episode의 모든 sampling-time log_prob을 요구한다.
+마지막 next_observation은 방문으로 추가하지 않는다. Input Episode도 수정하지 않는다.
+
+### Sampling 시점의 Behavior 확률
+
+기존 EpsilonGreedy는 `epsilon/A + (1-epsilon)*I(a in maxima)/len(maxima)`에서 실제로 샘플링하고
+그 선택의 Categorical log_prob을 반환한다. 동률에 대한 확률도 포함된다. Model.act의 no_grad는
+이 의미를 바꾸지 않는다. collector가 해당 log_prob을 즉시 복사하므로 이후 Q/epsilon 변화나
+Callback Tensor 재사용 후에도 기록된 log b(a|s)는 유지된다.
+
+```python
+episode = collect_episode(env, behavior_model.act, seed=seed)
+learner.learn(episode)
+```
+
+같은 데이터 계약을 직접 Gymnasium의 reset/step으로 구성할 수도 있다.
+아래는 Tabular State/Action용이며 Episode는 기존 Transition을 시간순으로 묶는다.
+log_prob은 env.step 전에 복사해 Callback이 같은 Tensor를 재사용해도 선택 시점의 값을 보존한다.
+
+```python
+from modular_rl.data import Episode, Transition
+
+transitions = []
+try:
+    observation, _ = env.reset(seed=seed)
+    while True:
+        output = behavior_model.act(observation)
+        action = output.action.item()
+        log_prob = output.log_prob.detach().cpu().clone()
+        next_observation, reward, terminated, truncated, _ = env.step(action)
+        transitions.append(Transition(observation, action, reward, next_observation,
+                                      terminated, truncated, log_prob))
+        if terminated or truncated:
+            break
+        observation = next_observation
+    episode = Episode(tuple(transitions))
+    learner.learn(episode)  # truncated-only Episode는 Learner가 거절한다.
+finally:
+    env.close()
+```
+
+두 수집 경로는 같은 환경·행동 RNG 상태에서 같은 기록과 IS 학습 결과를 만든다.
+정수 Callback의 기존 collect_episode 경로도 유지되지만 log_prob=None이므로 IS 학습에는 사용할 수 없다.
+
+각 log_prob은 scalar floating Tensor, finite, <=0이어야 한다. b=0을 뜻하는 -inf, NaN/Inf,
+log b>0, None은 갱신 전에 거절한다. log 공간의 유한 값은 양의 확률을 뜻하며, 불필요하게
+exp(log b)를 먼저 계산해 작은 양의 b를 0으로 만들지 않는다.
+Coverage는 π(a|s)>0 ⇒ b(a|s)>0다. 기록된 선택 행동만으로 미관측 행동의 support를 검증할 수
+없으므로 전체 Coverage는 호출자가 보장한다. 실험의 균등 b=1/4는 모든 Target 행동을 지원한다.
+int callback이나 평가용 deterministic ActionOutput의 None을 확률 1로 자동 추정하지 않는다.
+전체 Return을 사용하는 이 MC 계약은 Behavior와 Target이 거의 확실하게 종료하는 Episodic 정책을
+전제로 한다. 관측된 Episode의 종료만으로 Target 정책의 종료나 전체 Coverage를 증명할 수는 없다.
+
+### Return·Suffix Weight·방문 규칙
+
+```text
+G_t = reward[t] + gamma * G_(t+1)        # existing MonteCarloReturnGenerator
+rho_t = product(pi(a_k|s_k) / b(a_k|s_k), k=t,...,T-1)
+N[s] += 1
+C[s] += rho_t
+S[s] += rho_t * G_t
+ordinary: V[s] = S[s] / N[s]
+weighted: V[s] = S[s] / C[s], when C[s] > 0
+```
+
+V Prediction의 rho에는 현재 행동도 포함된다. log(pi)-log_b의 reverse cumulative sum 뒤 exp로
+전체 suffix 비율을 계산한다. Target 확률 0은 log=-inf이므로 해당 시점과 앞선 suffix Weight가
+정확히 0이 된다. First-visit는 Return/Weight 역순 계산과 독립적인 시간상 첫 **상태** 방문이며,
+Every-visit는 같은 상태의 모든 Return을 포함한다. On-policy Q Control의 (state,action) 방문과 다르다.
+
+Ordinary는 rho=0 표본도 N에 포함하므로 첫 zero sample에서 V=0이다. Weighted는 C=0이면
+기존 V를 유지하며 이후 양의 Weight가 처음 생기면 그 유효 표본으로 평균을 시작한다.
+초기 V를 가상 Return로 세지 않는다. Reward=4, gamma=1, b=.25, pi=.5인 종료 전이는 rho=2,
+Ordinary V=8, Weighted V=4다. 반복 상태 [1,2,1], reward [1,2,3], 매 행동 pi/b=2이면
+Return=[6,5,3], rho=[8,4,2]다. 상태1의 First 값은 Ordinary=48/Weighted=6, Every는 27/5.4다.
+
+### 수치·종료·저장 경계
+
+통계와 Weight는 float64로 계산해 float32 V의 범위와 구분한다. V는 원래 dtype을 유지한다.
+정확한 zero-target Weight와 양의 Weight가 underflow로 0이 되는 상황을 구분해 후자는 실패한다.
+Weight exp, 누적 Weight/Weighted Return, V dtype 변환에서 overflow·NaN·Inf가 발생하면
+FloatingPointError를 발생시킨다. 이번 Episode의 통계는 작업 복사본에 갱신한 뒤 유한성을 확인하고
+원본에 copy하므로 실패한 Episode가 일부 상태만 갱신하지 않는다. 유효한 기존 V와 통계도 보존한다.
+
+자연 종료된 Episode만 사용한다. open·truncated-only는 거절하고 자연 종료와 TimeLimit이 동시에
+True면 완료된 Return을 사용할 수 있다. Bootstrap이나 final reset 관측 추론은 추가하지 않는다.
+
+Model.state_dict는 V만 포함한다. 재개하려면 `visit_counts`, `weight_sums`, `weighted_return_sums`,
+고정 target_policy, gamma, method, visit_mode를 모두 함께 저장한다. 복원은 같은 구성의 Model을
+load한 뒤 각 통계 Tensor에 copy_한다. V만 복원해 통계를 0으로 두는 것은 정상적인 재개가 아니다.
+통계는 learn에서 live table device로 옮기며 Count의 long·합의 float64는 Model.float/double과 독립적이다.
+전체 실험의 재현에는 Episode 번호와 환경 RNG·CPU/CUDA PyTorch 행동 RNG도 필요하다.
+Target/gamma/method/visit_mode 변경은 추정 대상이나 누적 통계의 의미가 달라지므로 기존 재개와 구분한다.
+
+### 교재 Gridworld와 DP 검증
+
+```bash
+python -m examples.gridworld_off_policy_mc --episodes 1000 --seeds 7 11 19
+python -m examples.gridworld_off_policy_mc --episodes 100 --seeds 7 --target-uniform
+```
+
+고정 시작 (2,0), gamma=.9, First-visit다. b는 TabularQEstimator의 초기 Q와 EpsilonGreedy(1)의
+균등 Model이고 학습하지 않는다. π=(up,down,left,right)=(.3,.2,.2,.3)는 고정 확률 행렬로 별도 지정한다.
+두 독립적인 V Model에 동일한 기록 Episode를 전달한다. DP는 같은 π의 policy_evaluation을 사용하며
+RMSE는 Goal을 제외한 비종료 10개 상태다. cap=2000에서 truncated-only이면 두 Learner 갱신 전에
+실험을 중단한다. 환경은 finally에서 닫는다.
+
+| Seed | 1,000 Episode의 Step | Ordinary RMSE | Weighted RMSE |
+|---|---:|---:|---:|
+| 7 | 45,541 | .055652 | .062241 |
+| 11 | 45,887 | .047766 | .051419 |
+| 19 | 46,242 | .046639 | .040393 |
+| 평균 ± std (ddof=0) | 총 137,670 | .050019 ± .004010 | .051351 ± .008920 |
+
+Cutoff는 없었다. Ordinary IS의 높은 분산 가능성과 Weighted의 유한 표본 bias를 고려해 특정 Seed의
+성능 임계값·단조 감소·방법 순위를 합격 조건으로 두지 않는다. b=π 균등 실험(seed7, 100 Episode,
+4,203 Step)은 두 방법의 V/RMSE가 같고 max|Σrho-N|=0이었다. 결정적 테스트에서는 b=(.25,.75)의
+정확한 빈도 데이터와 Target=(.5,.5)에서 두 IS 방법이 DP 기대 보상 2를 복원하는 것도 검증한다.
+
+05 Notebook은 기존 On-policy Prediction/Control·확률변수 IS 뒤에 이 Prediction을 추가한다.
+Notebook에서 비율이나 V 갱신을 재구현하지 않고 고정 Target, Behavior Model, collect_episode,
+Learner, DP 비교만 사용한다. Off-policy MC Control과 SARSA는 현재 범위 밖이다.
 
 ## Tabular TD(0) Prediction Phase 3
 
@@ -1213,7 +1359,7 @@ Episode 수집은 공통 collect_episode로 처리한다. 비교 예제와 MC �
 
 SARSA는 수집 시 실제 선택한 next_action을 명시적으로 전달하는 계약이 먼저 필요하다.
 그 후 기존 TD0TargetGenerator와 TabularQUpdateRule을 재사용할 수 있다. On-policy MC Control은
-위의 별도 Q Learner로 구현했으며 기존 V Prediction을 변경하지 않는다. Off-policy Return 보정은 아직 없다.
+위의 별도 Q Learner로 구현했으며 기존 V Prediction을 변경하지 않는다. Off-policy V Prediction은 위의 별도 IS Learner로 구현한다.
 
 ## 교재 Notebook과 최소 사용성 API
 
@@ -1247,7 +1393,9 @@ Gymnasium 경로의 Notebook Run All 검증에서 MC/TD는 동일한 1,000 Episo
 Q-learning은 cutoff 0, 마지막 100 Episode 평균 보상 1.0, Greedy 5번 이동으로 목표에 도달했다.
 MC Control 섹션은 seed=7의 1,000 Episode·5,672 step 이후 Greedy 5 Step·보상 +1을 보였다.
 기존 13개 그림을 보존하고 Control의 Q/정책·DP 비교·성능 그림 3개를 추가했으며,
-세 Notebook의 텍스트·수치·16개 PNG 출력이 같은 Kernel의 두 실행에서 일치했다.
+Off-policy Prediction은 고정 Target의 DP 값과 Ordinary/Weighted V를 비교하는 그림 2개를 추가했다.
+seed7, 1,000 Episode·45,541 step에서 RMSE는 .055652/.062241이었고 b=pi의 Weight=1도 확인했다.
+세 Notebook의 텍스트·수치·18개 PNG 출력이 같은 Kernel의 두 실행에서 일치했다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 

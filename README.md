@@ -1,6 +1,6 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, DQNLearner, tabular DP, MC/TD(0) prediction and on-policy MC control**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC control. Runner, Agent, SARSA, off-policy MC control and other Neural Learners are not implemented.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, DQNLearner, tabular DP, on/off-policy MC prediction, TD(0) prediction and on-policy MC control**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner, Agent, SARSA, off-policy MC control and other Neural Learners are not implemented.
 
 ## Layout
 
@@ -20,6 +20,7 @@ modular_rl/
 │   ├── dqn.py                     # Online gather → target bootstrap → optimizer step
 │   ├── mc_prediction.py           # Complete episode → first/every sample average
 │   ├── mc_control.py              # Complete episode → state-action sample averages
+│   ├── off_policy_mc_prediction.py # Fixed-target V, recorded behavior log_prob, ordinary/weighted IS
 │   └── tabular_td0.py             # External batch → next V → TD target → V update
 ├── dp/
 │   └── algorithms.py              # Policy evaluation/improvement/iteration, value iteration
@@ -113,6 +114,14 @@ collects an ordered, owned `Episode` using an external action callback. It stops
 at either flag and leaves truncated fragments explicit. MC rejects truncated-only
 episodes; TD/Q bootstrap unless terminated. FrozenLake and CartPole use the same
 Gymnasium reset/step API, with their existing learning loops unchanged.
+Integer callbacks keep `log_prob=None`. ActionOutput callbacks, such as
+`collect_episode(env, behavior_model.act)`, record a detached CPU copy of the
+actual sampling-time log b(a|s) before env.step. Later Q/epsilon changes do not
+change these records. The discrete tensor action becomes an environment integer.
+Direct `reset/step` collection is also supported: snapshot
+`output.log_prob.detach().cpu().clone()` before `env.step`, store it in each
+`Transition`, and pass the ordered records to `Episode` and then the learner.
+See the step-by-step example in [ARCHITECTURE.md](docs/ARCHITECTURE.md#sampling-시점의-behavior-확률).
 
 ## Input / output contracts
 
@@ -542,6 +551,53 @@ optimal path length. The last 100 training episodes had mean reward 1.0.
 Fixed epsilon continues exploration; these measured results do not assert all Q
 values equal Q* or impose a stochastic score threshold in pytest.
 
+## Off-policy Monte Carlo prediction
+
+`OffPolicyMCPredictionLearner(model, return_generator, target_policy,
+method="weighted", visit_mode="first").learn(episode)` estimates a fixed target
+policy's V with a TabularVEstimator. It returns raw returns `(T,)`, detached,
+on the table dtype/device. Target policy is an owned `(S,A)` probability Tensor;
+behavior Model and environment remain external.
+
+Full-trajectory weights include the current action through the last action:
+`rho[t] = product(pi(a[k]|s[k]) / b(a[k]|s[k]), k=t..T-1)`.
+Ordinary IS computes `sum(rho*G)/N`; Weighted IS computes
+`sum(rho*G)/sum(rho)`. First/every visits refer to states in forward time, even
+though returns and suffix weights are computed backwards. Zero weights count
+toward ordinary N; zero accumulated weight leaves weighted V unchanged.
+
+```python
+# behavior_model uses a stochastic selector; target_policy is fixed (S,A).
+learner = OffPolicyMCPredictionLearner(value_model, MonteCarloReturnGenerator(.9),
+                                    target_policy, method="weighted")
+episode = collect_episode(env, behavior_model.act, seed=7)
+learner.learn(episode)
+```
+
+Every transition needs finite scalar `log_prob = log b(a|s) <= 0` from action
+selection time. Integer callbacks and deterministic evaluation with log_prob=None
+cannot supply IS data. Coverage requires `pi(a|s)>0 => b(a|s)>0`; recorded chosen
+action probabilities cannot establish support of unobserved actions.
+
+Save Model plus `visit_counts` (long), `weight_sums` and `weighted_return_sums`
+(float64), fixed target, gamma, method and visit mode. The three statistics have
+shape `(S,)` and are separate from Model.state_dict. Float64 accumulation preserves
+the table dtype. Log-space ratios avoid unnecessary division underflow;
+unrepresentable weights, sums or values raise without committing an episode.
+Positive-weight underflow is reported instead of treating it as a zero-target path.
+
+```bash
+python -m examples.gridworld_off_policy_mc --episodes 1000 --seeds 7 11 19
+python -m examples.gridworld_off_policy_mc --episodes 100 --seeds 7 --target-uniform
+```
+
+For gamma=.9, uniform behavior and fixed target `(up,down,left,right)=(.3,.2,.2,.3)`,
+the three-seed RMSE mean/std was .050019/.004010 (ordinary) and .051351/.008920
+(weighted), over 137,670 steps. All RMSE excludes the goal placeholder. With pi=b,
+100 episodes gave unit weights and identical ordinary/weighted values.
+These are experiment results, without a stochastic success threshold or a required
+ranking between methods. Off-policy MC Control and SARSA remain future work.
+
 ## Tabular TD(0) prediction and DP/MC comparison
 
 `TabularTD0PredictionLearner(model, target_generator, update_rule).learn(batch)`
@@ -580,7 +636,7 @@ for alpha=0.01 / 0.05 / 0.1. These are measured results, not performance thresho
 
 Chapters 4–6 tutorials are in [notebooks/dlfs4](notebooks/dlfs4/README.md).
 They use the book's **3×4** GridWorld, separate from Sutton's 4×4 environment.
-DP, MC Prediction, TD(0) Prediction and Q-learning call ModularRL's public APIs.
+DP, on/off-policy MC Prediction, MC Control, TD(0) Prediction and Q-learning call ModularRL's public APIs.
 The source correspondence table records the sample-average MC Control extension
 and explicitly lists unsupported off-policy MC Control and SARSA exercises.
 
