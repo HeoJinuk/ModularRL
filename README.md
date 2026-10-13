@@ -1,6 +1,6 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD(0) targets, TD UpdateRules, TabularQLearner, DQNLearner and tabular DP**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN and Sutton Gridworld dynamic programming. Runner, Agent, MC/TD prediction learners and other Neural Learners are not implemented.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, DQNLearner, tabular DP and MC prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN and Sutton Gridworld DP/first/every-visit MC. Runner, Agent, TD prediction learners, MC control and other Neural Learners are not implemented.
 
 ## Layout
 
@@ -9,6 +9,7 @@ modular_rl/
 ├── data/
 │   ├── outputs.py                  # ValueOutput / EstimatorOutput / ActionOutput
 │   ├── experience.py               # Transition / TransitionBatch
+│   ├── episode.py                  # Owned, ordered Transition snapshots
 │   ├── updates.py                  # TDLossOutput
 │   └── mdp.py                      # TabularMDP / joint TransitionOutcome atoms
 ├── model/
@@ -16,11 +17,13 @@ modular_rl/
 │   └── input_adapter.py           # NumPy, Tensor, scalars → Tensor
 ├── learner/
 │   ├── tabular_q.py               # External replay batch → Q-learning update
-│   └── dqn.py                     # Online gather → target bootstrap → optimizer step
+│   ├── dqn.py                     # Online gather → target bootstrap → optimizer step
+│   └── mc_prediction.py           # Complete episode → first/every sample average
 ├── dp/
 │   └── algorithms.py              # Policy evaluation/improvement/iteration, value iteration
 ├── environment/
-│   └── gridworld.py               # Reusable Sutton 4x4 known transition kernel
+│   ├── gridworld.py               # Reusable Sutton 4x4 known transition kernel
+│   └── episode_sampler.py         # External policy/outcome sampling with private RNG
 └── component/
     ├── representation/
     │   ├── base.py                # BaseRepresentation
@@ -31,7 +34,8 @@ modular_rl/
     │   └── replay.py              # Uniform replay with owned CPU snapshots
     ├── target_generator/
     │   ├── base.py                # Tensor inputs → target Tensor
-    │   └── td0.py                 # One-step TD formula; caller supplies next_value
+    │   ├── td0.py                 # One-step TD formula; caller supplies next_value
+    │   └── monte_carlo.py         # Reverse complete-episode returns, no bootstrap
     ├── update_rule/
     │   ├── tabular.py             # Sequential in-place V/Q updates
     │   └── td_loss.py             # TD error + mean neural loss; no optimizer calls
@@ -399,6 +403,40 @@ The example prints random-policy values, both optimal value tables, all selected
 optimal actions, convergence and reference errors. Gridworld's kernel and policy
 rows can later be reused for MC/TD comparison under the same fixed policy.
 See [Architecture](docs/ARCHITECTURE.md) for APIs, terminal handling and limits.
+
+## Tabular Monte Carlo prediction
+
+`Episode(transitions)` snapshots the existing Transition fields into owned,
+detached CPU tensors while preserving time order, continuity and boundary flags.
+It represents one nonempty episode, including an explicitly open/truncated one,
+rather than shuffled replay or a general trajectory batch.
+
+`MonteCarloReturnGenerator(gamma).generate(rewards)` computes returns `(T,)` in
+reverse. `MCPredictionLearner(model, return_generator, visit_mode="first")` uses
+TabularVEstimator and learns only naturally terminated episodes. It selects first
+visits in chronological order, or every visit, then applies `V[s] += (G-V[s])/count[s]`.
+`learn(episode)` returns all discounted targets `(T,)` with no graph.
+It never queries an MDP or chooses the behavior policy. The final next state is
+not another visit. Save its `visit_counts` separately alongside Model.state_dict,
+with the same gamma, visit mode and policy when resuming.
+
+`TabularEpisodeSampler(mdp, policy, seed=...).sample(start_state, max_steps=...)`
+owns a NumPy Generator and samples both actions and joint outcomes. A terminal
+start raises without taking a step. A cutoff is explicitly truncated; the learner
+rejects truncated-only/open episodes. The example aborts at a cutoff instead of
+silently learning a partial return or selecting only completed short episodes.
+
+```bash
+python -m examples.gridworld_mc
+python -m examples.gridworld_mc --episodes 100 --seed 7
+```
+
+Both visit modes receive identical episodes under the uniform policy. The example
+prints episode/step totals, state visit/update counts, estimated V and DP-reference
+RMSE over the 14 nonterminal states. With seed=7 and 20,000 episodes, RMSE was
+0.199544 (first) and 0.283310 (every), over 365,007 environment steps. These are
+experiment results; tests do not require monotonically decreasing stochastic RMSE.
+See [Architecture](docs/ARCHITECTURE.md) for contracts and checkpoint responsibilities.
 
 ## Examples
 

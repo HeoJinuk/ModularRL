@@ -7,7 +7,7 @@
 - 새로운 추상 계층, 불필요한 Registry 또는 GUI 코드를 도입하지 않는다.
 
 ## 현재 저장소의 범위
-- 현재는 Model 계약과 경험 데이터(Transition/TransitionBatch), ReplayBuffer, TD(0) TargetGenerator, Tabular TD 갱신, Neural TD Loss, TabularQLearner와 DQNLearner 및 Tabular DP Phase 1의 참조 구현이다. FrozenLake에서 Tabular Q-learning, CartPole에서 기본 DQN, Sutton Gridworld에서 Policy Evaluation/Iteration과 Value Iteration을 실행할 수 있다. Runner, Agent, MC/TD Prediction Learner, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
+- 현재는 Model·경험 데이터(Transition/TransitionBatch/Episode)·ReplayBuffer·TD(0)/MC Return·Tabular TD 갱신·Neural TD Loss·TabularQLearner·DQNLearner·DP Phase 1·MC Prediction Phase 2의 참조 구현이다. FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP 및 First/Every-visit MC를 실행할 수 있다. Runner, Agent, TD Prediction Learner, MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
 - 아래 Model 계약과 파일 배치는 이미 구현되어 있다. 기존 구현을 먼저 검토하고 중복 계층을 만들지 않는다.
 - 정수 입력은 기본적으로 torch.long으로 정규화한다. 정수로 저장된 연속 관측은 명시적인 InputAdapter dtype 설정을 사용한다.
 - Distributional 결과는 출력 payload에 담을 수 있으나, 해당 estimator/selector 및 학습 알고리즘이 구현된 것은 아니다.
@@ -19,7 +19,7 @@
 - Agent = Model + Learner
 - Model = InputAdapter + Representation + Estimator + ActionSelector
 - Learner = Buffer + TargetGenerator + UpdateRule + 선택적 WorldModel/Planner
-- 위 구성은 목표 학습 시스템의 논리적 구성이다. 현재 두 Learner는 외부 TransitionBatch만 받아 처리하며 Buffer를 소유하거나 샘플링하지 않는다.
+- 위 구성은 목표 학습 시스템의 논리적 구성이다. TabularQ/DQN Learner는 외부 TransitionBatch, MC Learner는 외부 Episode를 받으며 Buffer나 환경을 소유·샘플링하지 않는다.
 
 ## 목표 Model 계약
 - InputAdapter: NumPy, PyTorch Tensor, scalar 입력을 Tensor로 변환한다. Tabular State Index의 정수 dtype을 유지한다.
@@ -36,16 +36,16 @@
 
 ## 목표 파일 배치
 아래 경로는 Python 패키지 루트 기준이다.
-- `data/outputs.py`, `data/experience.py`, `data/updates.py`, `data/mdp.py`
+- `data/outputs.py`, `data/experience.py`, `data/updates.py`, `data/mdp.py`, `data/episode.py`
 - `model/rl_model.py`, `model/input_adapter.py`
 - `component/representation/{base,identity,mlp}.py`
 - `component/estimator/{base,actor_critic}.py`
 - `component/estimator/policy/`, `component/estimator/value/`
 - `component/action_selector/`
-- `component/buffer/`, `component/target_generator/{base,td0}.py`
+- `component/buffer/`, `component/target_generator/{base,td0,monte_carlo}.py`
 - `component/update_rule/{tabular,td_loss}.py`
-- `learner/{__init__,tabular_q,dqn}.py`
-- `dp/{__init__,algorithms}.py`, `environment/{__init__,gridworld}.py`
+- `learner/{__init__,tabular_q,dqn,mc_prediction}.py`
+- `dp/{__init__,algorithms}.py`, `environment/{__init__,gridworld,episode_sampler}.py`
 
 ## TargetGenerator 계약
 - TD0TargetGenerator는 외부에서 계산한 reward, next_value, terminated Tensor로 target 수식만 계산한다. Model, Buffer, Optimizer를 참조하지 않는다.
@@ -75,7 +75,15 @@
 - DP는 경험을 샘플링하지 않고 전체 결과의 기대값을 계산한다. CPU NumPy float64의 V `(S,)`와 Policy `(S, A)`를 사용한다. 기존 Tensor 기반 Model/Learner에 값을 옮기는 것은 호출자의 명시적 변환 책임이다.
 - Policy Evaluation과 Value Iteration은 동기식 sweep을 사용한다. Policy Improvement는 정확히 같은 최대 Q 행동에 균등한 확률을 부여하며 Policy Iteration은 같은 정책 행렬인지 확인해 안정성을 판단한다.
 - 반복 한도는 DPResult.converged=False로 보고한다. Policy Iteration은 평가 실패 시 Improvement를 진행하지 않으며 마지막 평가 Policy와 Value를 함께 반환한다. gamma=1에서 Proper Policy를 자동으로 판별하거나 수렴을 보장하지 않는다.
-- `environment/gridworld.py`의 알려진 kernel과 상태별 Policy 확률을 향후 MC/TD Prediction 비교에 재사용한다. 이번 DP 구현은 Sampler, MC/TD Learner 또는 Dyna Planner를 포함하지 않는다.
+- `environment/gridworld.py`의 알려진 kernel과 상태별 Policy 확률은 Phase 2 MC 및 향후 TD Prediction에 재사용한다. DP 알고리즘은 별도의 Episode Sampler/MC Learner와 독립적이며 Dyna Planner는 아직 없다.
+
+## MC Prediction 계약
+- Episode는 기존 Transition의 순서·연속성·경계를 보존하고 NumPy/Tensor 입력을 dtype 유지·graph 없는 owned CPU Tensor로 복사한다. 끝난 Episode 뒤의 전이나 불연속 전이는 거절한다. (T,B) 범용 Trajectory는 만들지 않는다.
+- MonteCarloReturnGenerator는 floating rewards `(T,)`에서 역순으로 전체 Return을 계산한다. Bootstrap 없이 gradient를 보존하며 기존 TD BaseTargetGenerator 상속을 강제하지 않는다.
+- MCPredictionLearner(model, return_generator, visit_mode="first")는 TabularVEstimator table에 정방향 first/every visit을 선택하고 count 증가 후 `(G-V)/count`로 sample average를 갱신한다. learn 반환값은 전체 시간 순서 Returns `(T,)`, graph 없음이다.
+- terminated=True만 MC 학습을 허용한다. truncated-only와 열린 Episode는 거절하고 양쪽 flag가 True면 실제 종료가 확인된 것으로 처리한다. 최종 next_observation은 추가 방문이 아니다.
+- visit_counts는 Model.state_dict에 포함되지 않는 Learner의 long Tensor다. 재개 시 V-table과 Counts를 같은 gamma·visit_mode·정책으로 함께 복원한다. Sampler RNG와 시작 상태 RNG도 별도 학습 상태다.
+- TabularEpisodeSampler는 알려진 MDP와 고정 Policy로 외부 Episode를 수집한다. terminal 시작은 거절하고 max_steps 중단은 truncated로 표시한다. 기본 MC 예제는 잘린 Episode를 버리고 계속하는 대신 실험을 명시적으로 중단한다.
 
 ## 가독성과 입력 검증
 - Readability First: 공개 메서드는 수식과 알고리즘의 핵심 흐름이 쉽게 읽히도록 작성한다.
@@ -100,6 +108,7 @@
 - FrozenLake 확인: examples extra 설치 후 `python -m examples.frozenlake_tabular_q`. 희소 보상 성공률을 단위 테스트 합격 조건으로 삼지 않는다.
 - CartPole 확인: `python -m examples.cartpole_dqn`. 전체 학습 성능은 예제로 보고하고 pytest에서는 결정적인 계산과 짧은 환경 Smoke Test를 검증한다.
 - Gridworld DP 확인: `python -m examples.gridworld_dp`. Gymnasium 없이 Sutton 참조 V와 Policy/Value Iteration의 최적 V를 검증한다.
+- Gridworld MC 확인: `python -m examples.gridworld_mc`. 같은 Uniform Policy에서 First/Every-visit을 비교하고 14개 비종료 상태의 DP 대비 RMSE를 보고한다. RMSE의 단조 감소를 pytest 조건으로 사용하지 않는다.
 
 ## Git 작업 원칙
 - 작업 전 branch와 `git status`를 확인하고 기존 수정·미추적·stage 상태를 파악한다. 사용자의 기존 변경을 삭제하거나 덮어쓰지 않는다.

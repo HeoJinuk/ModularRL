@@ -2,9 +2,10 @@
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
 ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·DQNLearner와
-Tabular Dynamic Programming Phase 1 참조 구현이다. Tabular Q-learning은 FrozenLake,
-기본 DQN은 CartPole, 알려진 MDP의 DP는 Sutton Gridworld 예제에서 실행할 수 있다.
-Runner, Agent, MC/TD Prediction Learner, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
+Tabular Dynamic Programming Phase 1 및 Monte Carlo Prediction Phase 2 참조 구현이다.
+Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole, DP/First·Every-visit MC는
+Sutton Gridworld 예제에서 실행할 수 있다. Runner, Agent, TD Prediction Learner,
+MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
 
@@ -766,7 +767,163 @@ Value Iteration은 4 sweep이며 두 최적 V의 참조 오차와 상호 차이�
 terminal 규칙을 맞춰 오차를 비교한다. TD Prediction에는 기존 TabularVEstimator,
 TD0TargetGenerator, TabularVUpdateRule을 재사용할 수 있다. 현재 Q-learning Learner의
 max Q Bootstrap은 고정 Policy의 V_pi 평가와 목적이 다르므로 이를 대신하지 않는다.
-이번 Phase 1에서는 환경 Sampler, MC/TD Learner 또는 Dyna용 인터페이스를 추가하지 않는다.
+Phase 1의 DP는 sampling과 독립적이다. Phase 2의 Episode Sampler와 MC Learner는 아래에
+별도로 추가하며 TD Prediction Learner와 Dyna용 인터페이스는 아직 구현하지 않는다.
+
+## Tabular Monte Carlo Prediction Phase 2
+
+Sutton & Barto의 [Chapter 5, Monte Carlo Prediction](https://www.incompleteideas.net/book/bookdraft2018mar21.pdf)을
+참고한다. DP는 알려진 확률 모델의 모든 결과를 합산하고, MC는 고정 정책에서 수집한 실제
+완료 Episode의 Return을 평균한다. 알려진 MDP를 사용하는 Sampler와 그 Episode만 보는
+Learner를 분리한다. MC Control, Off-policy Importance Sampling, Function Approximation은
+이번 범위에 포함하지 않는다.
+
+### Episode와 Replay Batch
+
+`data/episode.py`의 `Episode(transitions)`는 기존 Transition의 비어 있지 않은 순서열이다.
+observation, action, reward, next_observation, terminated, truncated, optional log_prob를
+그대로 보존하되 모든 present field를 owned CPU Tensor로 복사하고 graph를 제거한다.
+NumPy/Tensor dtype을 유지하므로 환경 배열 재사용이나 원본 Tensor 변경이 저장값을 바꾸지 않는다.
+Python numeric scalar는 torch.as_tensor의 기본 dtype 규칙을 사용한다. 필드는 frozen이지만
+Tensor 원소까지 immutable인 것은 아니므로 직접 수정할 때 계약을 지키는 것은 호출자 책임이다.
+
+Transition 간 next_observation과 다음 observation의 연속성을 검사한다. observation/next_observation은
+같은 shape·dtype이고 reward는 finite real scalar, 종료 flag는 bool scalar다. 중간에 종료나
+truncation이 있으면 뒤 전이를 붙일 수 없다. `len(episode)`, `episode.transitions`,
+`episode.terminated`, `episode.truncated`로 데이터와 최종 경계를 읽는다.
+열린 마지막 전이나 truncated-only 조각도 데이터로 표현할 수 있으나 MC 학습 입력으로는 거절한다.
+Episode는 `(T,B,...)` 범용 Trajectory가 아니며 ReplayBuffer의 무작위 `(B,...)`와 역할이 다르다.
+
+### Return Generator와 방문 규칙
+
+`MonteCarloReturnGenerator(gamma).generate(rewards: Tensor) -> Tensor`는 finite floating
+rewards `(T,)`에 대해 같은 dtype/device의 Return `(T,)`를 반환한다. gamma는 [0,1]이며
+빈 reward, 추가 batch 축, integer dtype과 비유한 입력을 거절한다.
+
+```text
+G = 0
+for t = T-1, ..., 0:
+    G = rewards[t] + gamma * G
+    returns[t] = G
+```
+
+Bootstrap 값은 없으며 rewards만으로 Episode 완료 여부를 판단할 수 없으므로 그 책임은
+호출자에게 있다. Generator는 gradient를 유지하고 Learner가 no_grad를 적용한다.
+Return 수치가 overflow하면 table/count 갱신 전에 FloatingPointError로 실패한다.
+기존 TD0TargetGenerator와 BaseTargetGenerator의 bootstrap 인터페이스는 변경하거나 상속하지 않는다.
+
+First-visit는 전체 Return을 계산한 후 원래 시간 순서로 상태를 확인해 첫 방문만 사용한다.
+역순 Return 계산 중 처음 발견한 상태를 첫 방문으로 취급하지 않는다. Every-visit는 각 시점의
+Return을 모두 평균에 포함한다. 방문 선택 이후의 계산은 다음 세 줄이다.
+
+```text
+count[state] += 1
+value[state] += (return_at_time - value[state]) / count[state]
+```
+
+고정 alpha TabularVUpdateRule과 달리 학습된 표본 수에 따른 Sample Average다.
+수식이 짧으므로 별도 Rule/Base Class를 추가하지 않고 MC Learner에서 직접 계산한다.
+초기 V를 pseudo sample로 세지 않는다. 동일 Episode에서 반복 방문한 상태도 Every-visit이면
+시간 순서대로 Count와 평균을 갱신한다. 상태 [1,2,1], reward [1,2,3], gamma=1의 Return은
+[6,5,3]이며 상태 1은 First-visit=6(count=1), Every-visit=4.5(count=2)다.
+
+### Learner API와 저장 상태
+
+| API / 데이터 | 계약 |
+|---|---|
+| `MCPredictionLearner(model, return_generator, visit_mode="first")` | TabularVEstimator Model, 독립 MC Return Generator, mode="first"/"every" |
+| `learn(episode: Episode) -> Tensor` | V-table in-place sample-average 갱신, 전체 시간 순서 Returns `(T,)` 반환 |
+| 입력 observation | scalar integer table index, table device의 long으로 정규화 |
+| 준비된 reward / 반환 Return | V-table의 floating dtype·device, 반환 graph 없음 |
+| `visit_counts` | Learner 소유 long Tensor `(N,)`, learn 시 현재 table device로 이동 |
+
+Representation은 Model 추론에서 State Index를 보존해야 하며 기본은 IdentityRepresentation이다.
+ActionSelector는 선택적이고 학습에 사용하지 않는다. Learner는 정책·MDP·ReplayBuffer를 받거나
+Model에서 Bootstrap을 계산하지 않는다. 최종 next_observation은 마지막 결과일 뿐 추가 방문으로
+세거나 갱신하지 않는다. Terminal placeholder V는 수집된 현재 상태로 나오지 않으므로 그대로 남는다.
+
+V-table은 기존 Model.state_dict에 저장되고 Count는 포함되지 않는다. 재개하려면 아래처럼 둘을
+함께 저장·복원하며 Model dtype/device와 gamma/visit_mode를 유지한다. Count만 0으로 초기화한
+채 학습된 V만 복원하면 첫 새 Return이 이전 평균을 덮어쓰므로 같은 학습의 재개가 아니다.
+
+```python
+import io
+import torch
+from modular_rl.component.estimator import TabularVEstimator
+from modular_rl.component.representation import IdentityRepresentation
+from modular_rl.component.target_generator import MonteCarloReturnGenerator
+from modular_rl.data import Episode, Transition
+from modular_rl.learner import MCPredictionLearner
+from modular_rl.model import Model
+
+model = Model(IdentityRepresentation(), TabularVEstimator(3)).double()
+learner = MCPredictionLearner(model, MonteCarloReturnGenerator(1), visit_mode="every")
+episode = Episode((Transition(1, 0, 1., 2, False, False),
+                   Transition(2, 0, 2., 1, False, False), Transition(1, 0, 3., 0, True, False)))
+torch.testing.assert_close(learner.learn(episode), torch.tensor([6., 5., 3.], dtype=torch.float64))
+assert model.estimator.v_table[1].item() == 4.5
+checkpoint = io.BytesIO()
+torch.save({"model": model.state_dict(), "visit_counts": learner.visit_counts.clone(),
+            "gamma": learner.return_generator.gamma, "visit_mode": learner.visit_mode}, checkpoint)
+checkpoint.seek(0)
+saved = torch.load(checkpoint, weights_only=True)
+restored_model = Model(IdentityRepresentation(), TabularVEstimator(3)).double()
+restored_model.load_state_dict(saved["model"], strict=True)
+restored = MCPredictionLearner(restored_model, MonteCarloReturnGenerator(saved["gamma"]), saved["visit_mode"])
+restored.visit_counts.copy_(saved["visit_counts"])
+torch.testing.assert_close(restored.visit_counts, learner.visit_counts)
+```
+
+고정된 정책도 같은 것으로 복원해야 한다. 완전한 실험 재현에는 현재 Episode 번호, 외부 시작
+상태 RNG와 `sampler.rng.bit_generator.state`를 별도로 저장한다. Policy 또는 gamma를 바꾸면
+이전 Return 평균의 추정 대상이 달라지므로 기존 학습과 섞지 않는다. Checkpoint Framework는 추가하지 않는다.
+
+### 외부 Episode Sampling과 Truncation 정책
+
+`TabularEpisodeSampler(mdp, policy, *, seed=None).sample(start_state, *, max_steps=10000)`는
+owned Policy float64 `(S,A)`와 독립 NumPy Generator를 사용한다. Policy shape·확률합을
+생성 시 검증한다. 매 step에서 정책으로 action을, 전이확률로 joint outcome을 선택하며
+reward와 next_state를 기록한다. DP와 같은 종료 규칙(outcome.terminated 또는 선언된 terminal
+진입)을 사용한다. 알려진 terminal에서 시작하면 RNG를 사용하거나 추가 전이를 만들지 않고
+ValueError를 발생시킨다. 특정 Gymnasium 환경의 P 포맷에 의존하지 않는다.
+
+마지막 자연 종료이면 max_steps와 같은 시점이어도 terminated=True, truncated=False다.
+끝나지 않은 채 max_steps에 도달하면 마지막 Transition만 truncated=True로 표시한다.
+MC Learner는 terminated=True인 Episode만 허용한다. 두 flag가 모두 True라면 실제 종료가
+확인되므로 학습할 수 있지만 truncated-only/open Episode는 Full Return이 없어 거절한다.
+TD의 Time-limit Bootstrap 규칙과 달리 순수 MC는 truncated Return을 Bootstrap으로 보완하지 않는다.
+
+기본 실험은 잘린 Episode가 나오면 두 Learner의 갱신 전에 명시적으로 중단한다.
+완료된 Episode만 계속 골라 수집하면 긴 Episode를 제외하는 selection bias가 생길 수 있으므로
+조용히 조각을 버리고 새 Episode를 수집하지 않는다. 종료가 어려운 정책은 max_steps 증가나
+정책의 Proper 여부를 별도로 검토해야 한다.
+
+### Gridworld 검증과 다음 TD(0) Prediction
+
+```bash
+python -m examples.gridworld_mc
+python -m examples.gridworld_mc --episodes 100 --seed 7
+```
+
+`examples/gridworld_mc.py`는 기존 sutton_gridworld(), uniform_policy(), policy_evaluation()을
+재사용한다. gamma=1이며 독립 시작 상태 RNG(seed=7)가 14개 비종료 상태 중 균등하게 선택하고
+Sampler RNG는 seed=8이다. 동일 Episode를 First/Every Learner에 전달한다. 예제 출력은
+Episode 수, 전체 환경 step, 시작 횟수, 상태별 update count, V, DP 대비 RMSE다.
+RMSE는 terminal 0/15를 제외한다. 전체 계산은 float64이며 default max_steps=10000이다.
+
+20,000 완료 Episode, 365,007 step에서 초기 RMSE=18.516402였고 First-visit=.199544,
+Every-visit=.283310이었다. 모든 비종료 상태에 sample이 있었고 terminal count/V는 0이었다.
+5,000/10,000/15,000 Episode의 RMSE는 First=.621222/.284128/.231667,
+Every=.619912/.295867/.240866이었다. 마지막 Every RMSE는 이전 구간보다 커졌지만 DP값에
+통계적으로 접근했다. 특정 Seed의 단조 감소나 전체 실험 RMSE 임계값을 pytest 합격 조건으로 삼지 않는다.
+결정적 테스트는 반복 상태·Return·평균·Count·경계·저장 복원을, 통계 테스트는 고정 Seed의
+행동/Outcome 빈도와 이론 확률을, 짧은 실험 테스트는 실행·RMSE 정의·재현성을 확인한다.
+
+다음 TD(0) Prediction은 같은 Transition, Episode의 시간 순서/종료 flags, 외부 Sampler,
+고정 Policy와 TabularVEstimator Model을 재사용할 수 있다. TD는 완성된 Episode를 기다리는 대신
+각 전이의 next V로 TD0TargetGenerator와 TabularVUpdateRule을 적용한다. MC와 달리 일반적인
+truncated 전이에서 Bootstrap이 가능하다. 고정 정책 V_pi 비교에는 기존 DP 참조값을 그대로 사용한다.
+이번 단계에서는 TD Prediction Learner나 범용 Trajectory Framework를 추가하지 않는다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 
