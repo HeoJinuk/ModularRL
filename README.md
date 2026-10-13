@@ -1,6 +1,6 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, DQNLearner, tabular DP, on/off-policy MC prediction, TD(0) prediction and on-policy MC control**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner, Agent, SARSA, off-policy MC control and other Neural Learners are not implemented.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner, Agent, SARSA and other Neural Learners are not implemented.
 
 ## Layout
 
@@ -21,6 +21,7 @@ modular_rl/
 │   ├── mc_prediction.py           # Complete episode → first/every sample average
 │   ├── mc_control.py              # Complete episode → state-action sample averages
 │   ├── off_policy_mc_prediction.py # Fixed-target V, recorded behavior log_prob, ordinary/weighted IS
+│   ├── off_policy_mc_control.py    # Reverse weighted Q updates, then deterministic greedy improvement
 │   └── tabular_td0.py             # External batch → next V → TD target → V update
 ├── dp/
 │   └── algorithms.py              # Policy evaluation/improvement/iteration, value iteration
@@ -596,7 +597,48 @@ the three-seed RMSE mean/std was .050019/.004010 (ordinary) and .051351/.008920
 (weighted), over 137,670 steps. All RMSE excludes the goal placeholder. With pi=b,
 100 episodes gave unit weights and identical ordinary/weighted values.
 These are experiment results, without a stochastic success threshold or a required
-ranking between methods. Off-policy MC Control and SARSA remain future work.
+ranking between methods. Off-policy MC Control is a separate learner below; SARSA remains future work.
+
+## Off-policy Monte Carlo control
+
+`OffPolicyMCControlLearner(model, return_generator).learn(episode)` updates the
+same TabularQEstimator Q-table and float64 `weight_sums` C `(S,A)`. It returns
+all raw returns `(T,)`, detached on the table dtype/device. Use the existing
+epsilon-greedy Model for behavior and record its sampling-time `log_prob`.
+Direct reset/step collection and `collect_episode(env, model.act)` both work.
+
+Reverse updates start with W=1: add W to C, update Q by `(W/C)*(G-Q)`, then
+check the **updated** Q row's deterministic argmax (smallest action ID on ties).
+If the action differs, break; otherwise divide W by recorded b for the next
+earlier transition. Q(s,a) conditions on the current action, so its update
+does not first multiply by that action's importance ratio. A first reward=4
+sample yields Q=4/C=1 even with b=.25. This is the standard weighted control
+rule, with no ordinary IS or first/every-visit option.
+
+Only naturally terminated episodes are learned; truncated-only/open episodes
+are rejected. The learner calls neither the environment nor Model.act and
+does not build a target model/policy matrix. Work copies keep numerical failures
+from partially changing Q/C. Save Model.state_dict and `weight_sums`, gamma and
+environment/action RNG state together. Coverage of target actions is the
+collector's responsibility; chosen-action logs cannot prove unobserved support.
+
+```python
+from modular_rl.learner import OffPolicyMCControlLearner
+
+learner = OffPolicyMCControlLearner(model, MonteCarloReturnGenerator(.9))
+episode = collect_episode(env, model.act, seed=7)
+returns = learner.learn(episode)
+```
+
+```bash
+python -m examples.gridworld_off_policy_mc_control --episodes 1000 --seeds 7 11 19
+```
+
+With gamma=.9 and epsilon=.1, seeds 7/11/19 used 5,701/5,625/5,574 steps.
+All learned greedy evaluations reached the goal in 5 steps with reward +1,
+matching the DP optimal path. Max-Q RMSE across ten nonterminal states was
+.250643/.060083/.000000, so successful start-state evaluation does not imply
+all-state/action Q convergence. Exploration remains active during training.
 
 ## Tabular TD(0) prediction and DP/MC comparison
 
@@ -638,7 +680,7 @@ Chapters 4–6 tutorials are in [notebooks/dlfs4](notebooks/dlfs4/README.md).
 They use the book's **3×4** GridWorld, separate from Sutton's 4×4 environment.
 DP, on/off-policy MC Prediction, MC Control, TD(0) Prediction and Q-learning call ModularRL's public APIs.
 The source correspondence table records the sample-average MC Control extension
-and explicitly lists unsupported off-policy MC Control and SARSA exercises.
+and records the standard weighted off-policy Control adaptation and unsupported SARSA exercises.
 
 From the project root, install the optional stack and register/select its kernel:
 

@@ -7,7 +7,7 @@
 - 새로운 추상 계층, 불필요한 Registry 또는 GUI 코드를 도입하지 않는다.
 
 ## 현재 저장소의 범위
-- 현재는 Model·경험 데이터(Transition/TransitionBatch/Episode)·ReplayBuffer·TD(0)/MC Return·Tabular TD 갱신·Neural TD Loss·TabularQLearner·DQNLearner·DP·On/Off-policy MC Prediction·TD(0) Prediction·On-policy MC Control의 참조 구현이다. FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD 비교와 교재 Gridworld MC Prediction/Control을 실행할 수 있다. Runner, Agent, SARSA, Off-policy MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
+- 현재는 Model·경험 데이터(Transition/TransitionBatch/Episode)·ReplayBuffer·TD(0)/MC Return·Tabular TD 갱신·Neural TD Loss·TabularQLearner·DQNLearner·DP·On/Off-policy MC Prediction/Control·TD(0) Prediction의 참조 구현이다. FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD 비교와 교재 Gridworld MC Prediction/Control을 실행할 수 있다. Runner, Agent, SARSA, 다른 Neural Learner, WorldModel/Planner는 아직 포함하지 않는다.
 - 아래 Model 계약과 파일 배치는 이미 구현되어 있다. 기존 구현을 먼저 검토하고 중복 계층을 만들지 않는다.
 - 정수 입력은 기본적으로 torch.long으로 정규화한다. 정수로 저장된 연속 관측은 명시적인 InputAdapter dtype 설정을 사용한다.
 - Distributional 결과는 출력 payload에 담을 수 있으나, 해당 estimator/selector 및 학습 알고리즘이 구현된 것은 아니다.
@@ -44,7 +44,7 @@
 - `component/action_selector/`
 - `component/buffer/`, `component/target_generator/{base,td0,monte_carlo}.py`
 - `component/update_rule/{tabular,td_loss}.py`
-- `learner/{__init__,tabular_q,dqn,mc_prediction,mc_control,off_policy_mc_prediction,tabular_td0}.py`
+- `learner/{__init__,tabular_q,dqn,mc_prediction,mc_control,off_policy_mc_prediction,off_policy_mc_control,tabular_td0}.py`
 - `dp/{__init__,algorithms}.py`, `environment/{__init__,gridworld,dlfs4_gridworld,episode_sampler,tabular_env,episode_collection}.py`
 
 ## TargetGenerator 계약
@@ -103,6 +103,12 @@
 - Count(long), Weight 합·Weighted Return 합(float64)은 별도 (S,) 학습 상태다. Model과 고정 Target/gamma/method/visit_mode, RNG를 함께 복원한다. V dtype/device는 Model을 따르며 비유한 통계·표현 불가능한 Weight/Value는 Episode 갱신 전에 실패한다.
 - Coverage(pi>0 ⇒ b>0)는 호출자 책임이다. 선택 행동의 log_prob만으로 미관측 행동의 support를 검증할 수 없다. 학습기는 환경·Behavior Model을 소유하지 않고 Control/SARSA나 Per-decision IS를 구현하지 않는다.
 
+## Off-policy MC Control 계약
+- OffPolicyMCControlLearner(model, return_generator)는 기존 TabularQEstimator table과 float64 weight_sums C(S,A)를 갱신한다. learn은 전체 시간순 Return (T,)을 graph 없이 table dtype/device로 반환한다.
+- 완료 Episode를 역순으로 처리한다. W=1에서 C+=W, Q+=(W/C)*(G-Q) 뒤 갱신된 Q의 argmax(동률 최소 Action ID)를 확인한다. 기록 행동이 다르면 중단하고, 같으면 이전 시점의 W를 기록 log b로 계산한다. 현재 행동 비율을 Q 갱신 전에 곱하지 않는다.
+- 수집과 탐색은 외부 Model/Selector·Gymnasium의 책임이다. 정수 callback은 여전히 가능하지만 이 Control은 모든 행동의 sampling-time log_prob을 요구한다. Ordinary/First/Every 옵션, Target Model/정책 행렬/공통 BaseLearner를 추가하지 않는다.
+- Q와 C 작업 복사본으로 비유한 수치 실패의 부분 갱신을 막고 기존 table storage를 유지한다. Model과 C·gamma·수집 RNG를 함께 복원하며 Coverage는 호출자 책임이다.
+
 ## TD(0) Prediction 계약
 - `TabularTD0PredictionLearner(model, target_generator, update_rule).learn(batch)`는 TabularVEstimator Model과 기존 TD0TargetGenerator/TabularVUpdateRule을 조합한다. State/reward/종료 fields `(B,)`를 table device·dtype에 맞추며 action, policy, MDP, Buffer를 학습에 사용하지 않는다.
 - no_grad에서 모든 next V와 Target을 먼저 계산하고 원본 V-table을 갱신한다. B>1은 갱신 전 Target을 고정하며 중복 상태는 기존 Rule의 순차 갱신을 따른다. 전이별 Online TD는 시간 순서대로 B=1 learn 호출을 사용한다. 반환 signed TD error는 `(B,)`, graph 없음이다.
@@ -134,6 +140,7 @@
 - Gridworld MC 확인: `python -m examples.gridworld_mc`. 같은 Uniform Policy에서 First/Every-visit을 비교하고 14개 비종료 상태의 DP 대비 RMSE를 보고한다. RMSE의 단조 감소를 pytest 조건으로 사용하지 않는다.
 - 교재 MC Control 확인: `python -m examples.gridworld_mc_control`. Training Reward와 Greedy 평가를 구분하고 DP 최적 5 Step과 비교한다. 확률적 성능을 단일 Seed 합격 조건으로 삼지 않는다.
 - Off-policy MC 확인: `python -m examples.gridworld_off_policy_mc --seeds 7 11 19`. 고정 Target의 DP 참조값과 Ordinary/Weighted IS를 비교한다. `--target-uniform`으로 b=pi의 Weight=1을 확인한다.
+- Off-policy MC Control 확인: `python -m examples.gridworld_off_policy_mc_control --seeds 7 11 19`. 탐색 Behavior와 결정적 Target의 평가를 구분하고 Q/C·DP 최적 경로를 보고한다.
 - Gridworld TD 비교: `python -m examples.gridworld_td --seeds 7 11 19`. 동일 경험에서 MC 두 모드와 TD alpha=.01/.05/.1을 비교한다. Episode/step별 RMSE와 Seed별 평균·표준편차를 보고하며 특정 알고리즘의 우위를 pytest 조건으로 삼지 않는다.
 
 ## Git 작업 원칙

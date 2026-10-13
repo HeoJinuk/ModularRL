@@ -2,10 +2,10 @@
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
 ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·DQNLearner와
-Tabular DP, On/Off-policy Monte Carlo Prediction, TD(0) Prediction 및 On-policy MC Control 참조 구현이다.
+Tabular DP, On/Off-policy Monte Carlo Prediction/Control 및 TD(0) Prediction 참조 구현이다.
 Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole, DP/MC/TD Prediction 비교는
-Sutton Gridworld, On-policy MC Control은 교재 3×4 Gridworld에서 실행할 수 있다. Runner, Agent,
-SARSA, Off-policy MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
+Sutton Gridworld, On/Off-policy MC Control은 교재 3×4 Gridworld에서 실행할 수 있다. Runner, Agent,
+SARSA, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
 
@@ -1092,7 +1092,7 @@ Count가 충분하다는 뜻은 아니며 단일 Seed의 성공률·길이를 py
 `05_mc_modularrl.ipynb`의 기존 Prediction 뒤에 On-policy MC Control 구성·학습·Q와 정책 표시,
 DP 비교를 추가한다. 원본 고정 alpha=.1/10,000 Episode와 달리 Sample Average/1,000 Episode다.
 Off-policy Prediction은 아래의 기록 확률·IS 통계로 구현한다. On-policy Control은 기존 int callback과
-log_prob=None을 계속 사용할 수 있다. Off-policy Control의 Q 갱신·정책 개선은 구현하지 않는다.
+log_prob=None을 계속 사용할 수 있다. Off-policy Control은 아래의 별도 Weighted IS Learner를 사용한다.
 SARSA는 실제 next_action과 선택 시점, terminated/truncated의 Bootstrap 의미를 명시한 입력 계약이 필요하다.
 
 ## Off-policy Monte Carlo Prediction
@@ -1234,7 +1234,97 @@ Cutoff는 없었다. Ordinary IS의 높은 분산 가능성과 Weighted의 유�
 
 05 Notebook은 기존 On-policy Prediction/Control·확률변수 IS 뒤에 이 Prediction을 추가한다.
 Notebook에서 비율이나 V 갱신을 재구현하지 않고 고정 Target, Behavior Model, collect_episode,
-Learner, DP 비교만 사용한다. Off-policy MC Control과 SARSA는 현재 범위 밖이다.
+Learner, DP 비교만 사용한다. Off-policy MC Control은 다음 섹션의 별도 Learner를 사용하며 SARSA는 범위 밖이다.
+
+## Off-policy Monte Carlo Control
+
+표준 Weighted IS Control을 기존 TabularQEstimator와 Model 위에 추가한다.
+Behavior는 같은 Model의 epsilon-greedy ActionSelector, Target은 갱신된 Q의 결정적 Greedy다.
+정책 행렬이나 Target Model을 Learner에 두지 않고, 환경·수집·RNG는 외부에 유지한다.
+Prediction의 고정 V 정책 및 Ordinary/First/Every 옵션을 이 Control에 혼합하지 않는다.
+
+| 공개 API / 상태 | 계약 |
+|---|---|
+| `OffPolicyMCControlLearner(model, return_generator)` | 기존 TabularQEstimator Model과 MC Return Generator |
+| `learn(episode: Episode) -> Tensor` | 전체 raw Return `(T,)`, 시간순, no_grad, Q dtype/device |
+| `weight_sums` | 누적 중요도 Weight C(s,a), float64 `(S,A)`, table device |
+| Target 행동 | 갱신된 Q 행의 argmax, 동률은 최소 Action ID |
+
+기존 Return Generator로 전체 G를 역순 계산한 뒤 아래 절차를 수행한다.
+Q는 현재 행동을 조건으로 하므로 시점 t의 W는 **t 이후** 행동의 비율만 포함한다.
+V Prediction의 rho_t는 현재 행동도 포함한다는 점과 다르다.
+
+```text
+W = 1
+for t = T-1, ..., 0:
+    G = returns[t]                       # existing Return Generator
+    C[s,a] += W
+    Q[s,a] += (W / C[s,a]) * (G - Q[s,a])
+    greedy = argmax(Q[s,:])              # after the update; first maximum
+    if a != greedy: break
+    W /= b(a|s)                          # recorded log b; only if an earlier t remains
+```
+
+Greedy 검사 전에 현재 Q를 갱신하므로 이 행동이 새 Greedy가 되면 이전 시점으로 계속한다.
+갱신 후 Greedy가 아니면 그 시점까지는 갱신되지만 앞부분은 변경하지 않는다.
+반복 상태-행동 쌍은 방문 필터 없이 역순으로 갱신한다. Return 반환에는 Early Break로
+건너뛴 앞부분도 포함한다. 행동 선택이나 Bootstrap을 Learner에서 호출하지 않는다.
+
+단일 reward=4, gamma=1, b=.25 표본은 Q=4/C=1이다. 두 단계 states=[0,1], actions=[0,1],
+rewards=[1,3], b=.25에서는 Q(1,1)=3/C=1, Q(0,0)=4/C=4다. 같은 쌍에 다른 Weight를 갖는
+Episode를 추가하면 C 분모를 공유한 Weighted Average가 된다. 수치 테스트는 갱신 전/후 Greedy
+변경과 동률 Early Break를 별도로 검증한다.
+
+### 수집·수치·Checkpoint
+
+직접 reset/step → Transition → Episode 또는 `collect_episode(env, model.act)`를 사용한다.
+직접 수집 코드는 위의 [Behavior 확률 기록](#sampling-시점의-behavior-확률) 예제와 같으며
+학습기를 OffPolicyMCControlLearner로 구성하면 된다. step 전에 log_prob을 detach·CPU clone하고
+수집 중 Q/epsilon을 고정한다. 종료 후 learn하면 다음 Episode의 같은 Model이 새 Q를 사용한다.
+기존 정수 callback도 유지하지만 log_prob=None 경험은 IS Control에 사용할 수 없다.
+
+모든 전이의 scalar integer 인덱스 및 scalar floating log b(finite, <=0)를 갱신 전에 확인한다.
+열린 Episode·truncated-only는 거절하고 자연 종료와 TimeLimit이 동시에 True면 허용한다.
+Coverage는 호출자 책임이며 기록된 선택 행동만으로 미관측 행동의 support를 검증할 수 없다.
+예제는 epsilon>0으로 모든 행동을 지원한다. 전체 Return의 Episodic 종료 전제를 유지한다.
+
+Weight와 C는 float64로 계산하며 Q는 원래 floating dtype/device를 유지한다.
+Return·W·C·Q 연산의 Overflow/NaN/Inf는 오류로 보고한다. Q/C 작업 복사본에서 역순 갱신하며
+성공한 경우만 기존 table storage와 C에 복사하므로 실패 시 기존 학습 상태가 보존된다.
+Early Break 뒤나 t=0 뒤에는 사용하지 않을 W를 계산하지 않는다.
+이는 별도 영구 Q-table이나 Estimator를 생성하는 구조가 아니다.
+
+```python
+torch.save({"model": model.state_dict(), "weight_sums": learner.weight_sums.clone(),
+            "gamma": learner.return_generator.gamma}, path)
+# Reconstruct the same dtype/device model and learner, then:
+model.load_state_dict(saved["model"], strict=True)
+learner.weight_sums.copy_(saved["weight_sums"])
+```
+
+C는 Model.state_dict에 포함되지 않는다. C 없이 이전 Q만 복원하면 같은 Weighted Average를
+재개하는 것이 아니다. Episode 번호와 환경/CPU·CUDA PyTorch RNG도 실험 재개 시 복원한다.
+
+### DLFS4 Gridworld와 Notebook
+
+`python -m examples.gridworld_off_policy_mc_control --seeds 7 11 19`는 gamma=.9, epsilon=.1,
+1,000 Episode, 고정 시작 7, float64, 학습 cap=2000·평가 cap=20을 사용한다.
+Episode Reward·누적 Step·Q·C·결정적 Target 행동·Greedy 평가·DP 최적 경로를 보고한다.
+기존 On-policy 예제의 별도 환경 Greedy 평가 함수를 재사용한다. cutoff-only 학습은 중단하며
+환경은 finally에서 닫는다. DP 및 기존 Model/수집/Data Class API는 변경하지 않는다.
+
+| Seed | Step | 학습 후 Greedy Step / Reward | max Q의 비종료 10개 상태 DP RMSE |
+|---|---:|---|---:|
+| 7 | 5,701 | 5 / +1 | .250643 |
+| 11 | 5,625 | 5 / +1 | .060083 |
+| 19 | 5,574 | 5 / +1 | .000000 |
+
+초기 Greedy는 20 Step cutoff, 학습 후는 DP와 같은 5 Step 경로였다.
+모든 Seed에서 training cutoff=0, 마지막 100 Episode 평균 보상=1.0이었다.
+일부 상태-행동의 C가 0인 점과 Seed별 오차를 함께 보고하며 전체 Q* 수렴이나 단일 Seed 성공을
+테스트 조건으로 삼지 않는다. 05 Notebook의 마지막 섹션은 첫 Episode를 직접 reset/step으로,
+나머지를 collect_episode로 수집하고 Learner만 호출한다. 기존 실습의 계산 코드는 유지한다.
+원본 고정 alpha=.2와 달리 이번 구현은 Sutton & Barto의 C 기반 표준 Weighted IS다.
 
 ## Tabular TD(0) Prediction Phase 3
 
@@ -1365,7 +1455,7 @@ SARSA는 수집 시 실제 선택한 next_action을 명시적으로 전달하는
 
 `notebooks/dlfs4/`는 『밑바닥부터 시작하는 딥러닝 4』 Chapter 4–6의 확인한 원본 실습을
 공개 API 호출로 표현한다. 알고리즘은 Notebook에서 재구현하지 않는다. DP의 제자리 모드,
-Off-policy MC Control, SARSA/Off-policy SARSA는 미구현으로 명시하며
+SARSA/Off-policy SARSA는 미구현으로 명시하며 Off-policy Control은 표준 Weighted IS로 구성하고
 [원본 실습 대응표](../notebooks/dlfs4/README.md)에 각 파일·설정·지원 상태·차이를 기록한다.
 
 `environment/dlfs4_gridworld.py`는 3×4 교재 TabularMDP와 그 Gymnasium 실행 환경 생성 함수를 제공한다.
@@ -1395,7 +1485,11 @@ MC Control 섹션은 seed=7의 1,000 Episode·5,672 step 이후 Greedy 5 Step·�
 기존 13개 그림을 보존하고 Control의 Q/정책·DP 비교·성능 그림 3개를 추가했으며,
 Off-policy Prediction은 고정 Target의 DP 값과 Ordinary/Weighted V를 비교하는 그림 2개를 추가했다.
 seed7, 1,000 Episode·45,541 step에서 RMSE는 .055652/.062241이었고 b=pi의 Weight=1도 확인했다.
-세 Notebook의 텍스트·수치·18개 PNG 출력이 같은 Kernel의 두 실행에서 일치했다.
+Off-policy Control은 첫 Episode를 reset/step으로 직접 수집하고 나머지를 collect_episode로 수집한다.
+seed7, 1,000 Episode·5,701 Step 이후 Greedy는 5 Step·보상 +1이었다. Q/Target·DP/C 비교와
+학습/평가 그래프 2개를 추가했다. 세 Notebook의 텍스트·수치·20개 PNG 출력이 같은 Kernel의
+두 실행에서 일치했고 기존 05의 코드 셀 21개 소스·출력은 이전 commit과 일치했다.
+전체 pytest는 1,276 passed, 27 skipped(CUDA 미지원)였다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 
