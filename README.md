@@ -1,6 +1,6 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, DQNLearner, tabular DP and MC prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN and Sutton Gridworld DP/first/every-visit MC. Runner, Agent, TD prediction learners, MC control and other Neural Learners are not implemented.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, DQNLearner, tabular DP and MC/TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN and Sutton Gridworld DP/MC/TD comparison. Runner, Agent, SARSA, MC control and other Neural Learners are not implemented.
 
 ## Layout
 
@@ -18,7 +18,8 @@ modular_rl/
 ├── learner/
 │   ├── tabular_q.py               # External replay batch → Q-learning update
 │   ├── dqn.py                     # Online gather → target bootstrap → optimizer step
-│   └── mc_prediction.py           # Complete episode → first/every sample average
+│   ├── mc_prediction.py           # Complete episode → first/every sample average
+│   └── tabular_td0.py             # External batch → next V → TD target → V update
 ├── dp/
 │   └── algorithms.py              # Policy evaluation/improvement/iteration, value iteration
 ├── environment/
@@ -437,6 +438,35 @@ RMSE over the 14 nonterminal states. With seed=7 and 20,000 episodes, RMSE was
 0.199544 (first) and 0.283310 (every), over 365,007 environment steps. These are
 experiment results; tests do not require monotonically decreasing stochastic RMSE.
 See [Architecture](docs/ARCHITECTURE.md) for contracts and checkpoint responsibilities.
+
+## Tabular TD(0) prediction and DP/MC comparison
+
+`TabularTD0PredictionLearner(model, target_generator, update_rule).learn(batch)`
+combines a TabularVEstimator Model with the existing TD0TargetGenerator and
+TabularVUpdateRule. It returns signed TD errors `(B,)` without a graph. Integer
+states are normalized to long, and floating rewards follow the live table's
+dtype/device. It does not choose actions, sample a buffer or use an MDP.
+
+All targets are evaluated before any batch write. With `B>1`, targets are frozen
+while duplicate states update in input order. For online TD, pass one transition
+at a time with `B=1`. Only termination masks bootstrap; a time-limit truncation
+uses the actual final observation supplied by the collector.
+
+```bash
+python -m examples.gridworld_td
+python -m examples.gridworld_td --episodes 5000 --seeds 7 11 19 --alphas 0.01 0.05 0.1
+python -m examples.gridworld_td --episodes 20 --log-every 5
+```
+
+The independent first/every-visit MC and three TD models receive identical
+completed episodes under the uniform policy, gamma=1 and uniform nonterminal
+starts. TD processes each already collected episode chronologically with B=1;
+this example does not implement a live streaming Runner. A cutoff aborts before
+any learner processes it. The example reports values, RMSE over 14 nonterminal
+states, episode/step checkpoints, alpha, seed and final RMSE mean/std across seeds.
+The Python `train_and_compare()` result also exposes these checkpoints as `history`.
+Constant-alpha TD retains sampling variability; no ordering of MC/TD performance
+or monotonic RMSE is imposed by tests. DP remains pure NumPy Bellman evaluation.
 
 ## Examples
 

@@ -2,9 +2,9 @@
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
 ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·DQNLearner와
-Tabular Dynamic Programming Phase 1 및 Monte Carlo Prediction Phase 2 참조 구현이다.
-Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole, DP/First·Every-visit MC는
-Sutton Gridworld 예제에서 실행할 수 있다. Runner, Agent, TD Prediction Learner,
+Tabular Dynamic Programming Phase 1, Monte Carlo Prediction Phase 2 및 TD(0) Prediction Phase 3 참조 구현이다.
+Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole, DP/MC/TD Prediction 비교는
+Sutton Gridworld 예제에서 실행할 수 있다. Runner, Agent, SARSA,
 MC Control, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
@@ -761,14 +761,14 @@ Sutton 참조값 최대 오차를 출력한다. theta=1e-10, gamma=1에서 평�
 Value Iteration은 4 sweep이며 두 최적 V의 참조 오차와 상호 차이는 모두 0이었다.
 테스트는 최적 Policy 배열 하나를 정답으로 고정하지 않고 선택 행동이 최대 Q를 갖는지 확인한다.
 
-향후 MC/TD Prediction은 같은 `mdp.transitions[s][a]`와 `policy[s]`로 실제 전이를
-샘플링하되 수집 루프·RNG·에피소드 종료는 별도로 설계한다. DP의 `policy_evaluation`을
+MC/TD Prediction은 같은 `mdp.transitions[s][a]`와 `policy[s]`로 실제 전이를
+샘플링하되 수집 루프·RNG·에피소드 종료를 Learner와 분리한다. DP의 `policy_evaluation`을
 고정 Policy의 V_pi 참조값으로 사용하고 같은 kernel, reward, gamma, 초기 상태 분포와
 terminal 규칙을 맞춰 오차를 비교한다. TD Prediction에는 기존 TabularVEstimator,
 TD0TargetGenerator, TabularVUpdateRule을 재사용할 수 있다. 현재 Q-learning Learner의
 max Q Bootstrap은 고정 Policy의 V_pi 평가와 목적이 다르므로 이를 대신하지 않는다.
-Phase 1의 DP는 sampling과 독립적이다. Phase 2의 Episode Sampler와 MC Learner는 아래에
-별도로 추가하며 TD Prediction Learner와 Dyna용 인터페이스는 아직 구현하지 않는다.
+Phase 1의 DP는 sampling과 독립적이다. Phase 2의 Episode Sampler/MC Learner와
+Phase 3의 TD Prediction Learner는 아래에 기술하며 Dyna용 인터페이스는 아직 구현하지 않는다.
 
 ## Tabular Monte Carlo Prediction Phase 2
 
@@ -923,7 +923,126 @@ Every=.619912/.295867/.240866이었다. 마지막 Every RMSE는 이전 구간보
 고정 Policy와 TabularVEstimator Model을 재사용할 수 있다. TD는 완성된 Episode를 기다리는 대신
 각 전이의 next V로 TD0TargetGenerator와 TabularVUpdateRule을 적용한다. MC와 달리 일반적인
 truncated 전이에서 Bootstrap이 가능하다. 고정 정책 V_pi 비교에는 기존 DP 참조값을 그대로 사용한다.
-이번 단계에서는 TD Prediction Learner나 범용 Trajectory Framework를 추가하지 않는다.
+Phase 2의 Episode 계약을 아래 Phase 3에서 그대로 재사용한다. 범용 Trajectory Framework는 추가하지 않는다.
+
+## Tabular TD(0) Prediction Phase 3
+
+Sutton & Barto의 [Chapter 6, TD Prediction](https://www.incompleteideas.net/book/bookdraft2018mar21.pdf)을
+따른다. MC는 완료된 Episode의 Return을 사용하지만 TD(0)는 관측한 reward와 현재 추정한
+next V로 Bootstrap한다. `learner/tabular_td0.py`는 기존 Model, TD0TargetGenerator,
+TabularVUpdateRule을 조합하며 새로운 TargetGenerator/UpdateRule/BaseLearner를 만들지 않는다.
+
+### 공개 API와 계산 경계
+
+| API / 데이터 | 계약 |
+|---|---|
+| `TabularTD0PredictionLearner(model, target_generator, update_rule)` | TabularVEstimator Model + TD0TargetGenerator + TabularVUpdateRule |
+| `learn(batch: TransitionBatch) -> Tensor` | 원본 V-table 갱신, 행 순서 signed TD error `(B,)` 반환 |
+| observation / next_observation | 비어 있지 않은 integer `(B,)`, 현재 table device의 long으로 정규화 |
+| reward / terminated / truncated | 같은 `(B,)`, floating reward와 bool flags |
+| 준비된 reward / 반환 error | V-table의 floating dtype·device, 반환 graph 없음 |
+| action / optional log_prob | 기존 TransitionBatch 필드 보존, V Prediction 계산에 사용하지 않음 |
+
+단일 전이도 `B=1`로 전달한다. Representation은 State Index를 보존해야 하며 기본 구성은
+IdentityRepresentation이다. 생성 후 Model.to/double을 호출해도 learn은 현재 v_table을 참조한다.
+입력 검증은 `_validate()`에 두고 기존 컴포넌트가 shape, table bounds와 target 계약을 검사한다.
+정책과 MDP, EpisodeSampler, ReplayBuffer, 행동 선택은 외부 책임이며 Optimizer가 없다.
+
+```text
+Batch.to(table.device, dtype=table.dtype), states -> long
+no_grad:
+    next_value = Model(next_states).values.v
+    target = TD0TargetGenerator.generate(reward, next_value, terminated)
+signed_error = TabularVUpdateRule.update(v_table, states, target)
+```
+
+수식은 `y = r + gamma * (1-terminated) * V(s')`, `delta = y - V(s)`,
+`V(s) += alpha * delta`다. TargetGenerator 자체의 gradient 보존 계약은 유지하고 Learner가
+Bootstrap과 Target 계산을 no_grad로 감싼다. Table 갱신/반환 graph 제거는 기존 Rule 책임이다.
+V(1)=4, V(2)=10, r=1, gamma=.9, alpha=.5이면 y=10, delta=6, 새 V(1)=7이다.
+같은 전이가 terminated=True면 y=1, delta=-3, 새 V(1)=2.5다.
+
+terminated만 Bootstrap을 제거한다. truncated=True/terminated=False인 일반적인 외부
+Time-limit은 Bootstrap하며 다음 Episode reset 대신 실제 마지막 관측을 전달하는 것은 수집자
+책임이다. Learner에는 terminal 상태 집합이나 Episode 연결을 추론하는 코드가 없다.
+Terminal placeholder V는 Sampler가 추가 전이를 만들지 않아 갱신하지 않으며 초기값 0을 유지한다.
+
+### Frozen Target Batch와 전이별 Online 갱신
+
+`B>1`에서는 모든 next V와 Target을 갱신 시작 전에 확정한다. 이후 같은 상태가 반복되면
+기존 UpdateRule이 이전 행에서 바뀐 현재 V를 사용해 순서대로 error/update를 계산한다.
+Bootstrap을 행 사이에 다시 평가하지 않는다. `B=1`을 순서대로 호출하면 다음 호출의 Target은
+이미 갱신된 테이블에서 계산된다. 이 차이는 의미 있는 알고리즘 계약이다.
+
+초기 V(1)=4, V(2)=10, gamma=.9, alpha=.5에서 전이 `(2,0,1)`, `(1,1,2)`의
+튜플은 각각 `(state,reward,next_state)`다. 한 Batch로 전달하면 delta=[-6.4,6],
+최종 V(1)=7, V(2)=6.8이다. 전이별 B=1 호출은 delta=[-6.4,3.12],
+최종 V(1)=5.56, V(2)=6.8이다. 두 방식 모두 Rule의 중복 상태 순차 갱신을 유지한다.
+
+V-table은 Model.state_dict에 포함된다. TD Learner에는 별도 Count나 Optimizer 상태가 없으며
+재개할 때 gamma/alpha, 고정 정책, Model dtype/device와 외부 수집 RNG를 함께 보존한다.
+MC의 visit_counts와 TD table은 서로 독립적이다.
+
+### 동일 경험을 사용하는 DP/MC/TD 비교
+
+```bash
+python -m examples.gridworld_td
+python -m examples.gridworld_td --episodes 5000 --seeds 7 11 19 --alphas .01 .05 .1
+python -m examples.gridworld_td --episodes 20 --log-every 5
+```
+
+`examples/gridworld_td.py`는 기존 MC 예제를 변경하지 않고 sutton_gridworld(), uniform_policy(),
+TabularEpisodeSampler와 policy_evaluation()을 재사용한다. gamma=1, 시작 상태는 14개 비종료
+상태에서 균등 추출한다. 시작 RNG는 seed, Sampler RNG는 seed+1이며 기존 MC와 동일하다.
+각 Seed에서 두 MC 및 세 alpha의 TD Model을 독립적으로 0에서 시작한다.
+
+MC는 같은 완료 Episode를 전체 입력으로 받고 TD는 그 Episode의 Transition을 시간 순서대로
+B=1 Batch로 만들어 학습한다. Episode 생성 후 처리하므로 실제 환경 종료 전에 학습하는
+Streaming Runner는 아니다. Cutoff이면 모든 Learner가 해당 Episode를 처리하기 전에 실패한다.
+이를 조용히 버려 긴 Episode를 제외하거나 MC에 미완성 Return을 전달하지 않는다.
+TD의 Truncation Bootstrap은 별도의 결정적인 단위 테스트로 검증한다.
+
+RMSE는 DP의 고정 정책 V_pi를 기준으로 terminal 0/15를 제외해 계산한다. 출력과 Python
+`train_and_compare()`의 `history`에는 초기값과 checkpoint별 Episode 수, 누적 환경 step,
+각 방법의 RMSE를 기록한다. 최종 V와 Seed/alpha/gamma도 보고하며 여러 Seed의 마지막
+RMSE 평균·표준편차는 ddof=0이다. 같은 경험은 방법 수와 관계없이 한 번의 환경 step으로 센다.
+Constant alpha TD는 표본 변동이 남을 수 있다. 특정 alpha가 MC보다 우수하거나 한 Seed의
+RMSE가 매 checkpoint 감소해야 한다는 테스트는 두지 않는다.
+
+검증 실행은 Seed마다 5,000 완료 Episode, 초기 V=0, float64, gamma=1이었다.
+초기 RMSE는 18.516402이며 아래는 각 Seed의 최종 RMSE다. 세 Seed의 실제 환경 step 합은
+274,415이고 MC/TD 모두 각 Seed 안에서 동일 Episode를 사용했다. Cutoff는 없었다.
+
+| Seed | 환경 step | First MC | Every MC | TD alpha=.01 | TD alpha=.05 | TD alpha=.1 |
+|---|---:|---:|---:|---:|---:|---:|
+| 7 | 89,019 | .621222 | .619912 | 1.567009 | 1.753061 | 2.018980 |
+| 11 | 92,728 | .351567 | .469013 | .680536 | 1.120250 | 1.701403 |
+| 19 | 92,668 | .217053 | .269155 | .564713 | 1.189102 | 2.026688 |
+| 평균 ± std | — | .396614 ± .168048 | .452694 ± .143660 | .937419 ± .447691 | 1.354138 ± .283479 | 1.915691 ± .151557 |
+
+예를 들어 seed=7, alpha=.05의 1,000/2,000/3,000/4,000/5,000 Episode RMSE는
+1.237541/1.155240/.856019/2.237295/1.753061이었다. 해당 checkpoint의 step은
+18,398/37,122/54,592/71,943/89,019다. 이 실행의 순위와 오르내림은 관측 결과이며
+MC 또는 TD의 일반적인 성능 우위로 해석하지 않는다.
+
+### 공통 데이터와 실제 중복
+
+| 공통 요소 | 사용 위치 |
+|---|---|
+| TabularMDP / TransitionOutcome, Policy `(S,A)` | DP 기대값과 MC/TD 외부 Sampler가 공유 |
+| State index, reward, 종료 flag와 실제 next state | 경험 Transition/Episode/TransitionBatch가 보존 |
+| 같은 reward/gamma/terminal 의미, 고정 정책 V_pi | 세 방식의 비교 기준 |
+| TabularVEstimator / Model | MC와 TD의 값 저장·추론·checkpoint; DP는 NumPy V 유지 |
+
+비교 예제와 기존 MC 예제의 시작 RNG 설정, 비종료 상태 목록, Model 초기화와 RMSE 계산은
+작게 반복된다. TD0 Learner와 TabularQLearner는 Batch 준비 및 reward/flag/index 검증이
+겹치지만 Bootstrap 선택과 Rule 호출이 다르다. 이 정도의 반복을 공통 Base나 통합 Framework로
+숨기지 않는다. DP Bellman 합산, MC 전체 Return 평균, TD 한 단계 Bootstrap은 별도 계산으로
+유지한다. 추가 통합 리팩터링은 현재 필요하지 않다.
+
+SARSA는 수집 시 실제 선택한 next_action을 명시적으로 전달하는 계약이 먼저 필요하다.
+그 후 기존 TD0TargetGenerator와 TabularQUpdateRule을 재사용할 수 있다. MC Control은
+상태-행동 Return 평균/Count와 외부 탐색 정책 개선이 필요하며 기존 V Prediction을 변경하지 않는다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 
