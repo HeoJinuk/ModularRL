@@ -669,6 +669,104 @@ TargetGenerator/UpdateRule을 호출하는 작은 함수**가 최소 후보다. 
 기존 코드 셀 13개의 소스·출력은 보존한다. 예제는 별도 학습 통계를 갖지 않으며 Q/epsilon은
 Model.state_dict에 포함된다. 학습 재개에는 gamma/alpha와 환경·PyTorch RNG도 보존해야 한다.
 
+## Double Q-learning 컴포넌트 조합 검증
+
+`examples/gridworld_double_q_learning.py`는 두 독립적인 TabularQEstimator Model을 조합한다.
+`modular_rl/` 내부 구현·공개 API를 변경하지 않고 새 Learner/Estimator/Runner 클래스를 만들지 않는다.
+두 테이블은 동일 shape·floating dtype·device를 사용하며 별도 storage를 요구한다.
+storage를 공유하는 두 view는 data_ptr가 달라도 거절한다. Representation은 정수 State ID를 유지한다.
+
+| 예제 API | 책임 |
+|---|---|
+| `combined_estimate(model1, model2, observation)` | 두 공개 forward 결과의 Q 합을 단일 Q payload로 반환; shape (...,A) |
+| `act_double_q(model1, model2, observation, selector, *, deterministic=False)` | 기존 Selector.select로 합산 Q의 ActionOutput 생성 |
+| `choose_update_first(rng)` | 명시적인 NumPy Generator로 50% 동전 한 번 선택 |
+| `learn_double_q(model1, model2, batch, target_generator, update_rule, *, update_first)` | 교차 Bootstrap과 기존 Target/Rule 조합; signed error (B,), graph 없음 |
+| `train_and_evaluate(...)` | Gymnasium B=1 online 학습·독립 Greedy 평가·DP 비교; 두 Model/Selector와 실험 결과 반환 |
+
+Behavior Policy는 반드시 epsilon-greedy(Q1+Q2)다. 기존 Model은 하나의 Estimator를 소유하므로
+두 Model.forward를 호출하고 `EstimatorOutput(values=ValueOutput(q=(q1+q2,)))`로 명시적으로 결합해
+Selector의 공개 select/probabilities를 사용한다. 두 Critic tuple을 Selector에 그대로 전달하지 않는다.
+합산 Tensor는 현재 출력일 뿐 별도의 영구 Q-table 복사본이나 매 Step 동기화 대상이 아니다.
+정상 입력의 단일/Batch 행동·log_prob, stochastic 균등 동률과 deterministic 최소 ID는 기존 Selector를 따른다.
+
+```text
+Q1 갱신: Q1.forward(next_state) -> argmax -> Q2.forward(next_state)의 해당 행동 gather
+Q2 갱신: Q2.forward(next_state) -> argmax -> Q1.forward(next_state)의 해당 행동 gather
+no_grad 교차 next_value (B,) -> 기존 TD0TargetGenerator.generate(reward, next_value, terminated)
+선택된 원본 q_table만 기존 TabularQUpdateRule.update(table, states, actions, target)로 갱신
+```
+
+현재 Q1(s,a)=4, Q2(s,a)=6, 다음 Q1=[10,2], Q2=[1,7], r=1, gamma=.9, alpha=.5이면
+Q1 갱신은 Target=1.9/Error=-2.1/새 Q1=2.95, Q2 갱신은 Target=2.8/Error=-3.2/새 Q2=4.4다.
+각 방향에서 반대 테이블·storage는 유지한다. Bootstrap의 argmax 동률은 최소 행동 ID이며
+합산 Behavior의 Greedy 행동 또는 반대 테이블의 max로 대체하지 않는다. Argmax는 RNG를 소비하지 않는다.
+
+입력은 기존 tabular TransitionBatch의 (B,) 정수 State/Action, floating reward, bool flags다.
+Batch는 두 테이블의 dtype/device에 맞추고 인덱스를 long으로 정규화한다.
+update_first는 호출 전체에 적용되는 단일 bool이며 행별 동전을 묵시적으로 허용하지 않는다.
+Q 선택·평가와 모든 Target을 갱신 전에 완료한 뒤 중복 쌍을 기존 Rule이 입력 순서로 갱신한다.
+예를 들어 Q1(s,:)=[4,0], Q2(s,:)=[6,0], gamma=1, alpha=.5, rewards=[1,3]의 Q1 중복 self-transition은
+Target=[7,9], Error=[3,3.5], 최종 Q1=7.25다. B=1 순차 호출은 매 전이의 새로운 Argmax를 사용한다.
+terminated에서 Bootstrap을 제거하고 truncated-only에서 실제 final observation으로 유지한다.
+
+### RNG와 저장·복원 경계
+
+환경 RNG는 첫 reset(seed=seed)의 Gymnasium np_random, Behavior는 torch.manual_seed(seed)의
+PyTorch RNG, 갱신 대상은 독립 default_rng(seed+2)다. 매 환경 Step마다 갱신 동전을 한 번 뽑는다.
+확률 조회, argmax, learn 함수와 deterministic Greedy 평가는 두 학습 RNG를 소비하지 않는다.
+환경의 전이 샘플링은 평가 환경의 독립 RNG로 수행한다. 동일 Seed 재실행은 Q1/Q2·행동·통계가 일치한다.
+
+별도 Learner 통계는 없지만 두 Model.state_dict와 외부 Selector.state_dict(epsilon), gamma/alpha,
+Torch CPU/CUDA RNG, 갱신 Generator.bit_generator.state를 함께 복원한다.
+수집자가 live 환경을 재개할 때는 환경 RNG와 Episode 위치도 관리한다. 현재 환경은 범용
+checkpoint API를 제공하지 않는다. 고정 경험 stream의 저장·복원 후 행동/동전/Error/테이블 재현성을 검증한다.
+
+### DLFS4 Gridworld 결과
+
+각 1,000 Episode, gamma=.9, alpha=.8, epsilon=.1, 시작 (2,0), 학습 cap=2,000 Step,
+Greedy 평가 cap=20이다. Q-learning 비교는 기존 Expected SARSA 예제의 comparator 함수를 그대로 재사용한다.
+`--compare-all`은 같은 함수로 SARSA/Expected SARSA도 실행한다. 각 알고리즘은 독립 환경·Model 실행이다.
+Notebook은 §12의 기존 comparator 결과를 재사용하며 다시 학습시키지 않는다.
+
+| Seed | Double Q Step / Q1·Q2 갱신 수 | Double Greedy | max 평균 Q와 V* RMSE | Q-learning Step / Greedy / RMSE |
+|---|---|---|---|---|
+| 7 | 6,017 / 3,044·2,973 | Goal 5 Step/+1 | 2.449e-9 | 5,738 / Goal 5 / .230544 |
+| 11 | 5,790 / 2,872·2,918 | Goal 5 Step/+1 | .148032 | 5,630 / Goal 5 / .069670 |
+| 19 | 5,796 / 2,868·2,928 | Goal 5 Step/+1 | 1.394e-8 | 5,611 / Goal 5 / .243963 |
+
+Double Q의 마지막 100 Episode 평균 Reward는 .99/.99/.97, 평균 Length는 5.62/5.58/5.44다.
+training cutoff는 세 Seed 모두 0이다. 초기 Greedy는 모두 평가 cutoff이며
+DP 최적 경로는 5 Step, V*(start)=.6561이다. Episode별 Reward/Length, 누적 Step, 두 Q-table,
+합산 Q Greedy 경로·DP 경로를 기록한다. 가치 비교는 비종료 10개 상태의 **max((Q1+Q2)/2)**를
+DP V*와 비교한다. 합산 Q의 두 배 스케일을 상태가치로 해석하지 않는다. 특정 Seed의 성능 순위나
+모든 Q값의 수렴을 테스트 조건으로 삼지 않으며 Gridworld 결과만으로 일반적인 Bias 감소를 주장하지 않는다.
+
+### Maximization Bias 원본 실험의 한계
+
+[Sutton & Barto §6.7, Example 6.7, pp.134–136](https://www.andrew.cmu.edu/course/10-703/textbook/BartoSutton.pdf#page=156)을
+확인했다. A의 right는 보상 0으로 종료, left는 보상 0으로 B에 간다. B의 여러 행동은
+평균 -.1·분산 1의 정규분포 보상으로 종료한다. A는 두 행동이며 B는 더 많은 행동을 사용한다.
+현재 TabularMDP의 유한 Outcome은 고정 실수 reward만 저장하고 모든 상태가 같은 n_actions를
+사용한다. TabularEnv에는 연속 Reward Sampler나 상태별 유효 행동 mask가 없다.
+원본 보상 분포와 정책을 정확히 재현하려면 핵심 환경 계약의 확장이 필요하므로 이번 실험은 제외한다.
+유한 보상 근사, 중복 행동 또는 새 환경 클래스로 원본 재현을 우회하지 않는다.
+
+### 범용성 평가와 최소 공통화 후보
+
+기존 Model/Estimator/출력/Selector/TargetGenerator/UpdateRule만으로 Double Q-learning을 실행할 수 있었다.
+새 클래스는 필요 없고 예제 함수만 추가했다. Model.act 자체가 두 Estimator를 자동 결합하지는 않아
+현재 Q 출력의 명시적 합산과 Selector 직접 호출이 필요했다. 불필요한 Q-table 복사·동기화는 없었다.
+TargetGenerator는 교차 next_value를 그대로 받고 Rule은 선택된 table만 갱신하므로 재사용에 문제가 없다.
+
+단일 Model facade와 기존 알고리즘별 Learner의 고정 Bootstrap은 복수 Model의 역할·결합·갱신 선택을
+자동 표현하지 않는다. 출력 tuple은 복수 Critic을 담을 수 있지만 결합 수학과 table 소유권은 상위 조합의 책임이다.
+공통화 후보는 **Q 출력의 명시적 결합 함수**와 **외부 next_value (B,)를 받아 기존 Target/Update를
+호출하는 작은 함수**다. 갱신 대상과 RNG 소유권은 호출자가 지정해야 한다.
+이번에는 BaseLearner/Bootstrap 계층이나 공개 API를 추가하지 않으며 함수 조합 결과만 기록한다.
+06 Notebook §13는 같은 예제 함수를 로드해 표시하고 수치·직접 Online 수집·두 테이블·Greedy/DP·
+다중 Seed 비교를 추가한다. 이전 코드 셀 18개와 출력은 보존한다.
+
 ## DQNLearner와 CartPole 검증
 
 `learner/dqn.py`의 DQNLearner는 외부 Online Model, Target Model, Optimizer,
@@ -1655,10 +1753,10 @@ seed7, 1,000 Episode·5,701 Step 이후 Greedy는 5 Step·보상 +1이었다. Q/
 두 실행에서 일치했고 기존 05의 코드 셀 21개 소스·출력은 이전 commit과 일치했다.
 SARSA는 γ=.9, α=.8, ε=.1, Seed7의 1,000 Episode/8,604 Step 이후 Greedy 5 Step/+1을 보였다.
 직접 Next Action을 재사용하는 루프와 다중 Seed 비교 루프의 Q가 일치하며 비교 결과는 위에 기록한다.
-Greedy 정책·학습 Reward/Length/Step 그림 2개를 추가했다. Expected SARSA는 §12의 예제 조합으로
-검증하며 추가 그림 2개를 포함해 총 24개 PNG와 텍스트·수치가 두 Run All에서 일치했다.
-기존 06의 코드 셀 13개 소스·출력·실행 번호·메타데이터도 이전 commit과 일치했다.
-최종 전체 pytest는 1,365 passed, 31 skipped(CUDA 미지원)였으며 본체 추적 파일 61개는 변경하지 않았다.
+Greedy 정책·학습 Reward/Length/Step 그림 2개를 추가했다. Expected SARSA §12와 Double Q-learning §13은
+예제 함수 조합으로 검증하며 그림 2개씩 추가해 총 26개 PNG와 텍스트·수치가 두 Run All에서 일치했다.
+기존 06의 코드 셀 18개 소스·출력·실행 번호·메타데이터도 이전 commit과 일치했다.
+최종 전체 pytest는 1,409 passed, 35 skipped(CUDA 미지원)였으며 본체 추적 파일 61개는 변경하지 않았다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 

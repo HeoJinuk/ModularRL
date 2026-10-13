@@ -795,6 +795,56 @@ max/gather bootstrap selection; the example verifies component reuse without
 introducing a shared Learner or bootstrap interface. Details and comparison
 metrics are in [ARCHITECTURE.md](docs/ARCHITECTURE.md#expected-sarsa-컴포넌트-조합-검증).
 
+## Double Q-learning component composition
+
+`examples/gridworld_double_q_learning.py` uses two independent Models with
+TabularQEstimator buffers. No library Learner, extra estimator class or third
+behavior table is added; `modular_rl/` stays unchanged.
+
+```python
+from examples.gridworld_double_q_learning import act_double_q, choose_update_first, learn_double_q
+
+selected = act_double_q(model1, model2, observation, selector)
+td_error = learn_double_q(
+    model1, model2, transition.to_batch(), target_generator, update_rule,
+    update_first=choose_update_first(update_rng),
+)
+```
+
+Behavior and greedy evaluation use the unchanged EpsilonGreedyActionSelector on
+an explicit `EstimatorOutput(values=ValueOutput(q=(q1 + q2,)))`. The public
+Selector is called directly because each Model has one estimator. Q1 updates
+select `argmax Q1` and evaluate that action with Q2; Q2 updates reverse the roles.
+The existing TD0TargetGenerator and TabularQUpdateRule calculate the target and
+update exactly one table. The example function consumes no random numbers.
+
+Each online B=1 step flips a fair coin with `default_rng(seed+2)`, independent of
+Gymnasium's environment RNG and PyTorch's behavior sampling RNG. For B>1, one
+`update_first` bool selects the table for the whole call; targets are frozen
+before the existing sequential duplicate updates. Termination/truncation and
+the real final-observation contract are preserved. Bootstrap argmax ties use
+the first index; behavior ties use the existing uniform sampling rule.
+
+```bash
+python -m examples.gridworld_double_q_learning --episodes 1000 --seeds 7 11 19
+python -m examples.gridworld_double_q_learning --episodes 1000 --seeds 7 11 19 --compare-all
+python -m pytest -q tests/test_double_q_composition.py tests/test_gridworld_double_q_learning.py
+```
+
+The CLI reuses the existing Q-learning comparator and optionally SARSA/Expected
+SARSA. With gamma=.9, alpha=.8, epsilon=.1, Double Q-learning reached the goal in
+5 greedy steps for all three seeds, using 6,017/5,790/5,796 training steps.
+DP also takes 5 steps. Value comparisons use `max((Q1+Q2)/2)`, while actions use
+Q1+Q2. Results include both tables, episode rewards/lengths and update counts;
+no stochastic performance ranking is required by tests.
+
+Notebook 06 §13 loads the same example functions, preserves earlier code/output,
+and adds an online loop, numerical checks and comparison figures. The book's
+Gaussian-reward Maximization Bias experiment needs a continuous reward sampler
+and different valid action counts per state, which the current TabularMDP does
+not represent. Its exact experiment is excluded; see the source and scope
+analysis in [ARCHITECTURE.md](docs/ARCHITECTURE.md#double-q-learning-컴포넌트-조합-검증).
+
 ## Examples
 
 ```python
