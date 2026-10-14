@@ -580,8 +580,8 @@ SARSA는 탐색을 포함한 행동 정책을 학습하므로 DP Q*를 직접 �
 06 Notebook은 기존 TD(0)/Q-learning을 보존하고 마지막에 SARSA 수치 예제·B=1 Step-by-step·
 독립 다중 Seed 비교와 Greedy/학습 성능 그림을 추가한다. 환경 실행만 Notebook에 두고
 Target/Q 갱신은 Learner의 공개 API에 맡긴다. 직접 SARSA 루프와 비교 루프의 Seed 7 Q도 일치한다.
-Off-policy SARSA는 아직 구현하지 않는다. Expected SARSA와 Online n-step SARSA는 아래의 예제 조합으로
-검증하며 라이브러리 Learner는 추가하지 않는다.
+Expected SARSA, Online n-step SARSA와 고정 정책 평가용 Off-policy n-step SARSA는 아래의 예제 조합으로
+검증하며 라이브러리 Learner는 추가하지 않는다. Off-policy n-step Control은 아직 구현하지 않는다.
 
 ## Expected SARSA 컴포넌트 조합 검증
 
@@ -868,6 +868,119 @@ TD0TargetGenerator와 TabularQUpdateRule이다. 추가된 것은 ordered window 
 끝점 값 선택은 max/Policy 기대값/실제 행동으로 다르다. Q(sigma)는 중간 분기·확률·sigma 혼합이 필요하므로
 endpoint 교체만으로 구현된다고 보지 않는다. 이번에는 공통 인터페이스나 BaseLearner/Buffer를 추가하지 않는다.
 06 Notebook §14는 같은 예제 함수와 기존 comparator를 사용하고 이전 49개 셀 전체를 그대로 보존한다.
+
+## Off-policy n-step SARSA 컴포넌트 조합 검증
+
+`examples/gridworld_off_policy_n_step_sarsa.py`는 고정 Target Policy의 Qπ를 평가한다.
+`modular_rl/`의 61개 추적 파일과 공개 API는 변경하지 않는다. 새 Learner, TargetGenerator,
+UpdateRule, Policy/Runner 클래스나 Framework를 만들지 않는다.
+
+| 예제 함수 | 책임 |
+|---|---|
+| `learn_off_policy_n_step_sarsa(model, window, target_generator, update_rule, *, target_policy, bootstrap_action=None, bootstrap_log_prob=None)` | ordered B=1 window의 head 하나 갱신; 반환 dict의 `target=G`, `effective_target`, `raw_td_error=G-Q`, `td_error=Yeff-Q`, `importance_ratio` |
+| `run_episode(env, model, target_generator, update_rule, *, target_policy, n=3, seed=None)` | Online 수집, sampling-time 확률 저장, 지연 head update/flush, 실제 Step당 한 번 갱신 |
+| `train_and_evaluate(mode="different", n=3, episodes=200, ...)` | 고정 정책 평가, 같은 π의 DP Qπ 참조, Episode/Step/RMSE/ρ/ESS 기록 |
+| `run_comparison(seed=7, episodes=200, ns=(1,3,5), ...)` | 기존 On-policy, π=b, π≠b 독립 실행과 정확한 동등성 검증 |
+
+Window/Index 검증과 On-policy 비교 실행은 원래 n-step 예제의 함수를 그대로 재사용한다.
+예제 패키지는 설치 대상이 아니므로 Notebook cwd에서도 동작하는 표준 `runpy.run_path`로 그 파일을 읽는다.
+기존 함수의 소스와 Notebook inspect 출력은 유지한다. 원래 수집 함수는 최종 행동만 전달하며
+log_prob이나 학습 callback 확장 경로가 없다. 따라서 새 예제에 약 30줄의 같은 deque 수집·head/pop·flush
+흐름이 남고, 짧은 forward/gather와 TD0 역순 합성도 명시적으로 배치한다. 계산 컴포넌트는 충분하지만
+수집 조합 인터페이스는 아직 공유되지 않았다는 한계다. 이를 감추기 위한 monkeypatch나 Wrapper는 만들지 않는다.
+
+### Return, Importance Ratio와 Effective Target
+
+[Sutton & Barto §7.3, 식 (7.11), p.149](https://www.andrew.cmu.edu/course/10-703/textbook/BartoSutton.pdf#page=171)을 따른다.
+실제 reward 수 m에 대해 기존 TD0를 역순 호출하여
+`G = sum(gamma**k * reward[k]) + gamma**m * Q(endpoint, sampled_action)`을 얻는다.
+자연 종료는 Bootstrap을 제거한다. 갱신 대상 Aτ는 비율에서 제외한다.
+Bootstrap이 있으면 Aτ+1부터 **sampled endpoint Aτ+m까지** π/b를 곱한다.
+자연 종료면 마지막 실제 행동 A(T−1)까지만 포함하고 빈 곱은 1이다.
+Expected SARSA는 끝점 기대값을 사용하므로 끝점 비율이 빠진다는 차이가 있다.
+
+Time-limit truncated-only는 실제 final observation에서 행동과 log b를 한 번 선택해 보관한다.
+그 행동을 실행하거나 flush 중 다시 선택하지 않는다. 같은 끝점 행동으로 각 head 갱신 직전의 Q를
+다시 평가한다. 각 호출 내부 Target/ρ는 write 전에 확정하지만 전체 flush의 Q를 한 번에 동결하지 않는다.
+terminated=True가 우선하므로 두 flag가 True인 경우에도 Bootstrap하지 않는다.
+이는 자연 종료 교재 수식을 외부 Time-limit Bootstrap에 확장한 규칙이다.
+
+TD0와 Q Rule의 API는 그대로다. `Yeff = current_Q + rho * (G-current_Q)`를 기존 Rule에 전달하여
+`Q += alpha * (Yeff-current_Q)`를 수행한다. ρ=1은 G를 그대로 전달하고 ρ=0은 current_Q를 전달한다.
+출력 (1,) Tensor는 table dtype/device이며 graph가 없다. ρ만 float64다.
+`td_error`는 실제 Rule의 가중 Error이고 `raw_td_error`는 원래 signed Error다.
+유한 정밀도에서 Effective Target을 만드는 덧셈/뺄셈 때문에 일반 ρ의 반환 Error는
+수학적인 `rho * raw_td_error`와 작은 반올림 차이가 있을 수 있다. 이 방식은 B=1 Tabular 갱신의
+조합이며 Neural Loss 가중치나 중복 B>1 Effective Target에 그대로 일반화하지 않는다.
+
+실행한 행동은 기존 Transition.log_prob에 저장한다. 아직 실행하지 않은 Bootstrap 행동은
+별도 action/log_prob으로 전달한다. Model.act의 실제 확률은 Q/ε 갱신 전 선택한 값이며 현재 Selector를
+다시 조회하지 않는다. Batch.to가 floating field를 cast하더라도 IS에는 원본 log_prob을 사용한다.
+Target 확률의 log는 그 확률표 dtype에서 계산하고 기록 log와 함께 float64로 누적·exp한다.
+float32 기록은 원래 Sampling의 정밀도 한계를 유지하며 복구할 수 없는 정밀도를 만들어내지 않는다.
+
+π=0이면 ρ=0, b=0에 해당하는 -inf log나 NaN/Inf/양수 log는 거절한다.
+선택 행동의 로그만으로 미관측 행동의 Coverage `pi>0 ⇒ b>0`를 검사할 수 없으며 수집자가 보장한다.
+양의 비율의 overflow/underflow, table dtype으로 표현 불가능한 비율·Target·Error·갱신을 검사하고
+**현재 head의 write 이전에** 실패한다. Clipping은 없다. 앞선 성공한 Online 갱신을 rollback하는
+Episode 단위 트랜잭션은 아니다. 실패한 head는 호출자가 pop하지 않는다.
+
+수치 검증: n=1은 G=2.8, ρ=2, raw δ=-1.2, Qnew=2.8이다.
+n=3은 G=8.146, ρ=3, Qnew=11.219다. m=2 자연 종료는 G=2.8/ρ=2/Qnew=2.8,
+Truncation은 G=6.04/ρ=6/Qnew=14.12다. ρ=0은 변화 없이 후속 head를 처리한다.
+π=b Uniform에서 n=1/3/5, float32/64, 길이 <n/=n/>n, 두 종료 flag 조합의 행동·Reward·Target·
+Error·Q·Step·RNG가 기존 On-policy 코드와 정확히 일치한다.
+
+### 고정 정책 실험과 재개 상태
+
+Behavior는 기존 EpsilonGreedyActionSelector(1)의 실제 Uniform 확률 .25다. Matched π=.25,
+Different π=[.3,.2,.2,.3]이며 모두 caller-owned 확률표 (S,A)로 보관하고 Q에 따라 개선하지 않는다.
+gamma=.9, alpha=.05, n=1/3/5, Seeds7/11/19, CLI 200 Episode, Notebook 100 Episode를 사용한다.
+`--episodes 1000`으로 예산을 늘릴 수 있다. 동일 Uniform Behavior와 Seed는 세 모드의 실제 경험도 일치시킨다.
+비종료 10개 상태의 모든 행동에 대해 기존 policy_evaluation/action_values의 **동일 π Qπ**와 RMSE를 비교한다.
+Episode reward/length, 누적 Step/Update, ρ 평균/최대/0 비율과 ESS=(sum ρ)²/sum ρ²를 기록한다.
+ESS는 Weight 집중도 진단이며 중첩 window의 독립 표본 수라고 해석하지 않는다.
+고정 alpha의 유한 표본 결과를 최적 제어 성공이나 알고리즘 우위로 해석하지 않는다.
+
+CLI 실제 실행 결과(각 200 Episode):
+
+| Seed | 각 run Step=Update | n=1 Matched / Different RMSE | n=3 Matched / Different RMSE | n=5 Matched / Different RMSE |
+|---|---|---|---|---|
+| 7 | 8,419 | .074577 / .071736 | .113803 / .166660 | .144084 / .213516 |
+| 11 | 8,412 | .104793 / .098586 | .053557 / .073633 | .076829 / .110648 |
+| 19 | 8,774 | .127772 / .124573 | .088591 / .102298 | .106447 / .131470 |
+
+On-policy와 Matched의 모든 Q/Reward/Length는 동일했다. Different의 ρ 평균은 .996924~1.012976,
+최댓값은 n=1/3/5에서 1.2/1.728/2.48832이고 0 비율은 모두 0이었다.
+ESS는 n=1에서 8,097~8,443, n=3에서 7,520~7,822, n=5에서 7,005~7,284였다.
+자연 종료·Time-limit 경계 처리는 별도 결정적 테스트로 검증한다.
+세 Seed의 RMSE 평균±표준편차는 실행 결과에서 계산할 수 있고, Notebook은 100 Episode 예산으로 이를 출력한다.
+
+재개에는 Model.state_dict(ε 포함), 고정 π, n/gamma/alpha, owned pending batches,
+Bootstrap action/log_prob, 현재 관측·선택 행동, Torch CPU/CUDA RNG가 필요하다.
+실제 수집 재개는 환경 위치/RNG/TimeLimit 잔여 예산과 누적 통계도 보존해야 한다.
+테스트는 고정 경험 stream에서 Model/pending/끝점/정책/RNG 복원 후 Error/Q/다음 행동을 비교한다.
+범용 환경 mid-episode checkpoint API나 checkpoint 클래스는 만들지 않는다.
+
+### 구조적 평가와 향후 최소 공통화 후보
+
+- Model/InputAdapter/Identity/TabularQ/Selector, Transition/Batch, TD0, Q Rule을 그대로 조합할 수 있었다.
+  시간 Window 검증·On-policy comparator는 재사용하지만 수집 scheduling의 함수 추출은 하지 않았다.
+- Target Policy는 고정 확률 Tensor면 충분하다. Transition.log_prob은 실행된 행동에 충분하며,
+  실행 전 끝점 ActionOutput의 확률은 별도로 보관해야 한다.
+- Effective Target으로 Q Rule을 바꾸지 않고 IS를 적용할 수 있었다. 원래/가중 Error의 차이와
+  rounding, B=1 적용 범위가 한계다. Neural Loss에 같은 기법을 강제하지 않는다.
+- Off-policy MC와 공유 가능한 것은 sampling-time log, 고정 확률표, log-space 비율·Coverage 검증이다.
+  MC Prediction은 현재 행동부터 전체 Episode, 여기서는 현재 행동 이후부터 짧은 sampled 끝점이라는 범위 차이가 있다.
+  Expected SARSA와는 Q 평가·정책 확률표·TD0·Q Rule을 공유할 수 있지만 Return/IS 범위는 다르다.
+- 최소 후보는 ordered B=1 window, actual horizon/boundary, 끝점 action/log_prob 또는 명시적
+  continuation을 받는 함수다. n-step Expected SARSA는 끝점 기대값과 중간 비율을 사용한다.
+  Tree Backup은 각 중간 상태의 Q/π 분기 기대값, Q(σ)는 이들 및 시점별 σ·sampled log를 추가로 필요로 한다.
+  단일 Bootstrap callback만으로 모두 해결된다고 보지 않으며 이번에는 공통 Framework를 구현하지 않는다.
+- Control 확장은 현재 Q를 사용한 별도 Policy Improvement와 Target Policy를 평가하는 시점의 계약이 필요하다.
+  과거 b는 항상 보존한다. 이번 고정 평가에 Control을 섞지 않는다.
+
+06 Notebook §15는 같은 예제 함수를 호출하며 이전 59개 셀·출력·메타데이터 전체를 보존한다.
 
 ## DQNLearner와 CartPole 검증
 
@@ -1856,7 +1969,7 @@ seed7, 1,000 Episode·5,701 Step 이후 Greedy는 5 Step·보상 +1이었다. Q/
 SARSA는 γ=.9, α=.8, ε=.1, Seed7의 1,000 Episode/8,604 Step 이후 Greedy 5 Step/+1을 보였다.
 직접 Next Action을 재사용하는 루프와 다중 Seed 비교 루프의 Q가 일치하며 비교 결과는 위에 기록한다.
 Greedy 정책·학습 Reward/Length/Step 그림 2개를 추가했다. Expected SARSA §12, Double Q-learning §13,
-Online n-step SARSA §14는 예제 함수 조합으로 검증하며 그림 2개씩 추가해 총 28개 PNG와 텍스트·수치가
+Online n-step SARSA §14와 Off-policy n-step 고정 정책 평가 §15는 예제 함수 조합으로 검증하며 그림 2개씩 추가해 총 30개 PNG와 텍스트·수치가
 두 Run All에서 일치했다. 기존 06의 49개 셀 전체(코드 23개)의 소스·출력·실행 번호·메타데이터도 이전 commit과 같다.
 최종 전체 pytest는 1,479 passed, 37 skipped(CUDA 미지원)였으며 본체 추적 파일 61개는 변경하지 않았다.
 

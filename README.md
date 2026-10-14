@@ -894,6 +894,38 @@ Current Learners do not own this temporal state, and random ReplayBuffer samples
 do not guarantee its order. The contracts and remaining generalization questions
 are recorded in [ARCHITECTURE.md](docs/ARCHITECTURE.md#online-n-step-sarsa-컴포넌트-조합-검증).
 
+## Off-policy n-step SARSA component composition
+
+```bash
+python -m examples.gridworld_off_policy_n_step_sarsa --episodes 200 --seeds 7 11 19 --ns 1 3 5
+```
+
+This example evaluates a **fixed target policy**, using the existing Model,
+TabularQEstimator, EpsilonGreedyActionSelector, Transition/Batch, TD0TargetGenerator
+and TabularQUpdateRule. No library file or public API changes, or new Learner class,
+are needed. `learn_off_policy_n_step_sarsa(..., target_policy=pi,
+bootstrap_action=action, bootstrap_log_prob=log_b)` updates one ordered window head.
+Its dictionary distinguishes raw `G-Q` from the effective-target `td_error` returned
+by the existing rule, and records the target and importance ratio.
+
+Importance ratios exclude the current action and include the sampled bootstrap
+action. Natural termination has no endpoint action; time-limit truncation saves one
+bootstrap-only action and its sampling-time log probability for all remaining
+updates. No past probability is recomputed, no flush action is resampled, and no
+weight is clipped. Numerical failure rejects the current write.
+
+The comparison uses gamma=.9, alpha=.05, uniform behavior (epsilon=1), and either
+the same uniform target or fixed target `[.3,.2,.2,.3]`. Matched-target results must
+exactly reproduce the original on-policy n-step example. Each target is compared
+with **its own DP Qpi**, rather than optimal-control values. The CLI records
+episode rewards/lengths, steps/updates, Q, rho statistics and effective sample size.
+`--episodes 1000` increases the budget; tutorial §15 uses 100 episodes per run.
+
+[ARCHITECTURE.md](docs/ARCHITECTURE.md#off-policy-n-step-sarsa-컴포넌트-조합-검증)
+describes coverage, checkpoint ownership and remaining collection-code overlap.
+The existing 59 cells and outputs of `06_td_modularrl.ipynb` are preserved.
+Control, n-step Expected SARSA, Tree Backup and Q(sigma) remain future work.
+
 ## Examples
 
 ```python

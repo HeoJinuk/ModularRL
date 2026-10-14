@@ -91,6 +91,7 @@ Episode를 학습하지 않고 비교를 중단한다. TD/Q는 terminated에서�
 | Expected SARSA 조합 검증 확장 | 06 §12 | Model.forward, 동일 ActionSelector.probabilities, TD0TargetGenerator, TabularQUpdateRule | 실행 완료·예제 함수 | 새로운 Learner 없이 ΣπQ; 기존 코드 셀·출력 유지, 본체 API 변경 없음 |
 | Double Q-learning 조합 검증 확장 | 06 §13 | 두 Model.forward, EstimatorOutput, 기존 Selector.select, TD0TargetGenerator, TabularQUpdateRule | 실행 완료·예제 함수 | 독립 table·Q 합 Behavior·교차 Bootstrap; 원본 Gaussian Bias 실험은 현재 환경 계약으로 정확히 표현 불가 |
 | Online n-step SARSA 확장 | 06 §14 | Model.act/forward, Transition.to_batch, TD0TargetGenerator 역순 합성, TabularQUpdateRule | 실행 완료·예제 함수 | deque의 B=1 시간순 window; actual action 유지·boundary flush, TDN/SequenceReplay는 현재 없음 |
+| Off-policy n-step SARSA 확장 | 06 §15 | 기존 Model/Selector, Transition.log_prob, TD0 역순 합성, Q UpdateRule | 실행 완료·고정 정책 평가 예제 | 현재 행동 제외·sampled 끝점 포함 IS, π=b 동등성, π≠b의 동일 π DP Q 비교 |
 | common/gridworld.py: GridWorld | 세 Notebook 환경 구성 | dlfs4_gridworld, make_dlfs4_gridworld_env, TabularEnv, DLFS4_STATES/START_STATE | 실행 완료 | DP의 알려진 kernel과 Gymnasium 실행 환경 분리; compact State ID |
 | common/gridworld_render.py: Renderer | 세 Notebook 결과 표시 | plot_grid, Matplotlib | 실행 완료·간소화 | Q 삼각형 대신 행동별 heatmap; 목표 V=0과 진입 +1 구분 |
 | common/utils.py: argmax/greedy_probs/plot_total_reward | 06 §8–10 | ActionSelector.select/probabilities, plt.plot | 실행 완료·대체 | 원본 무작위 단일 argmax와 달리 동률 집합의 정확한 확률 사용 |
@@ -166,6 +167,14 @@ n개 보상이 모이는 즉시 가장 오래된 행을 학습하고 boundary에
 실제 다음 행동은 학습 전에 선택해 다음 step까지 유지한다. Truncation은 마지막 선택 행동으로 실제
 남은 보상 수의 discount를 적용하고, 각 residual call의 현재 Q를 읽는다. 기존 49개 셀은 모두 그대로 보존한다.
 
+Off-policy n-step §15는 별도의 고정 확률표 π를 평가한다. 실행한 행동의 log b는 Transition,
+아직 실행하지 않은 끝점의 행동/log b는 별도로 보관한다. 중요도 비율은 head 행동을 제외하고 sampled
+Bootstrap 행동까지 포함하며 Truncation flush에서 다시 선택하지 않는다. `Yeff=Q+rho*(G-Q)`로
+기존 Q Rule을 재사용하고 rho=1은 원래 G를 직접 전달한다. 이전 59개 셀·출력·메타데이터를 보존한다.
+새 섹션은 100 Episode, gamma=.9, alpha=.05, Seeds7/11/19, n=1/3/5를 실행하며 CLI는 기본 200 Episode다.
+Uniform Behavior와 Uniform/다른 고정 Target을 비교하고 각각의 DP Qpi 기준 RMSE·ρ 통계·ESS를 출력한다.
+이는 고정 정책 평가이며 최적 제어 성공으로 해석하지 않는다.
+
 `tests/test_dlfs4_notebooks.py`는 nbformat 검증 후 각 Notebook을 같은 Kernel에서 두 번
 실행하고 텍스트·숫자·PNG 출력이 같은지 확인한다. 별도의 작은 테스트 kernelspec으로 현재
 pytest Python을 사용하며 사용자의 Kernel 등록 상태를 바꾸지 않는다. 기본 library 설치에서는
@@ -210,8 +219,8 @@ Control 단일 표본 reward=4/b=.25는 Q=4/C=1, 두 단계 rewards=[1,3]은 Q=[
 SARSA 수치 예제의 a′=1은 Error=-1.2/Q=3.4, a′=0은 Error=6/Q=7, terminal은 Error=-3/Q=2.5다.
 직접 루프와 비교 루프의 Seed7 Q는 일치한다. 종료·Truncation·선택 횟수/실행 재사용·Batch/Online
 차이·dtype/device·Model 복원을 결정적으로 검증한다. Seed19의 Greedy cutoff도 그대로 보고한다.
-전체 pytest는 1,479 passed, 37 skipped(CUDA 미지원)다. 세 Notebook Run All 두 번의
-텍스트·수치·28개 PNG는 일치했고 기존 06 Notebook의 49개 셀 전체(코드 23개)는 이전 commit과 같다.
+전체 pytest는 1,601 passed, 45 skipped(CUDA 미지원)다. 세 Notebook Run All 두 번의
+텍스트·수치·30개 PNG는 일치했고 기존 06 Notebook의 59개 셀 전체(코드 28개)는 이전 commit과 같다.
 quickstart·DP/MC/TD/On/Off-policy MC·FrozenLake·CartPole Smoke Test도 통과했다.
 
 Expected SARSA 추가 실험은 학습 중 Reward/Length와 누적 Step을 기록한다. Seed7의 학습 cutoff 23회와
@@ -233,9 +242,17 @@ n=3, T=5는 3번째 환경 Step부터 갱신하고 마지막 두 행을 종료 �
 관련 책임·checkpoint pending/선택 행동·향후 endpoint 조합 후보는
 [ARCHITECTURE.md](../../docs/ARCHITECTURE.md#online-n-step-sarsa-컴포넌트-조합-검증)에 기록한다.
 
+Off-policy n-step 수치 예제 A/B/C/D의 (G,ρ,Qnew)는 (2.8,2,2.8), (8.146,3,11.219),
+(2.8,2,2.8), (6.04,6,14.12)다. n=1/3/5의 Matched π=b는 기존 On-policy의 행동·Reward·Target·
+Error·Q·Step·RNG와 정확히 일치한다. 기록 확률 유지, 수치 실패 전 쓰기 차단, 고정 stream의
+Model/pending/끝점/정책/RNG 복원을 결정적으로 검증한다. §15를 포함한 06은 69개 셀, 코드 34개, PNG 15개다.
+Notebook 100 Episode의 Different Qpi RMSE는 n=1/3/5에서 세 Seed 평균±표준편차
+.209765±.014594 / .111875±.011099 / .135703±.015378이다. CLI 200 Episode 결과는
+[ARCHITECTURE.md](../../docs/ARCHITECTURE.md#off-policy-n-step-sarsa-컴포넌트-조합-검증)에 기록한다.
+
 ## 최소 확장 제안
 
 - MC Control 확장: 현재 Sample Average와 별도로 원본 고정 α 갱신·GLIE 등의 의미를 설계한다. 이번 구현에 이미 포함됐다고 간주하지 않는다.
-- SARSA 확장: Expected SARSA는 §12 예제 조합으로 검증한다. Off-policy SARSA·n-step의 입력과 수식은 별도로 설계하며 현재 Transition 필드를 임의로 추가하지 않는다.
-- Off-policy 확장: 현재 V Prediction·Weighted Q Control과 구분해 Per-decision IS 등의 계약을 별도로 설계한다. Off-policy SARSA는 아직 구현하지 않는다.
+- SARSA 확장: Expected SARSA는 §12, Online n-step은 §14, 고정 π Off-policy n-step은 §15 예제 조합으로 검증한다. Tree Backup/Q(σ)의 분기·확률 계약은 별도로 설계하며 Transition 필드를 임의로 추가하지 않는다.
+- Off-policy 확장: 현재 V Prediction·Weighted Q Control·n-step 고정 정책 평가와 구분해 Per-decision IS와 n-step Control의 계약을 별도로 설계한다.
 - 제자리 DP: 필요할 때 별도 모드의 수치 의미를 설계한다. Notebook 단순화를 위해 지금 추가하지 않는다.
