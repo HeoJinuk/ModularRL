@@ -982,6 +982,152 @@ Bootstrap action/log_prob, 현재 관측·선택 행동, Torch CPU/CUDA RNG가 �
 
 06 Notebook §15는 같은 예제 함수를 호출하며 이전 59개 셀·출력·메타데이터 전체를 보존한다.
 
+## Online n-step Tree Backup 컴포넌트 조합 검증
+
+`examples/gridworld_tree_backup.py`는 기존 컴포넌트로 고정 정책의 Qπ를 평가한다.
+`modular_rl/`의 61개 파일과 공개 API는 그대로다. 새로운 Learner, TargetGenerator,
+UpdateRule, Policy/Base/Runner 클래스는 추가하지 않는다.
+
+| 예제 함수 | 책임 |
+|---|---|
+| `learn_tree_backup(model, window, target_generator, update_rule, *, target_policy)` | contiguous B=1 ordered window의 head만 갱신; signed `G-current_Q` (1,), table dtype/device, graph 없음 |
+| `run_episode(env, model, target_generator, update_rule, *, target_policy, n=3, seed=None)` | step → owned Transition snapshot → eligible head update → 다음 행동 선택; boundary flush |
+| `train_and_evaluate(target_mode="different", n=3, episodes=200, ...)` | Uniform Behavior와 고정 π, 같은 π의 DP Qπ 참조·RMSE·Reward/Length/Step/Update 기록 |
+| `run_comparison(seed=7, episodes=200, ns=(1,3,5), ...)` | 기존 On-policy 기준과 Off-policy SARSA matched/different, Tree matched/different 비교 |
+
+기존 Off-policy 예제의 고정 정책 검증과 SARSA 실험 함수, n-step 예제의 Window/차원·경계 검증을
+재사용한다. 설치하지 않는 examples 파일은 Notebook에서도 읽을 수 있도록 기존 방식인
+`runpy.run_path`로 로드한다. 원래 예제 함수 및 Notebook inspect 출력은 수정하지 않는다.
+
+### 같은 Snapshot에서의 재귀 계산
+
+[Sutton & Barto §7.5, 식 (7.15–16), p.153](https://www.andrew.cmu.edu/course/10-703/textbook/BartoSutton.pdf#page=175)의
+Tree Backup은 실제 다음 행동의 분기를 재귀 Return으로 확장하고 다른 행동은 현재 Q로 평가한다.
+
+```text
+no_grad: 필요한 next states의 Model estimate를 한 번 계산
+         Q rows와 고정 π rows 또는 Selector.probabilities(같은 estimate) 보관
+         Vπ = sum(pi * Q)
+         G = terminal ? 0 : Vπ(endpoint)
+         reversed(window):
+             last row: C = G
+             earlier row: C = Vπ(next) + pi(actual_next_action) * (G - Q(next,actual_next_action))
+             G = TD0.generate(reward, C, terminated)
+         TabularQUpdateRule.update(table, head_state, head_action, G)
+```
+
+π=0은 sampled 분기만 끊고 Vπ를 그대로 사용한다. π=1은 G를 직접 전달하여
+불필요한 상쇄·반올림을 피한다. 일반 π에서는 위 식을 직접 사용하며 IS 비율·Weight·Clipping·
+Effective Target은 계산하지 않는다. Behavior log_prob은 Transition 계약대로 저장할 수 있지만
+Tree Target에서 조회하거나 유효성을 요구하지 않는다. 미관측 상태-행동 학습을 보장하려면
+Behavior의 충분한 방문은 여전히 필요하며 IS가 없다는 이유로 Coverage가 자동 확보되지는 않는다.
+
+Model의 한 batched forward가 필요한 모든 다음 상태 Q rows의 owned lookup 결과를 반환한다.
+같은 호출에서 table을 갱신하는 것은 마지막 Rule 호출뿐이며 동일 Snapshot의 Q/π로 재귀한다.
+자연 종료의 마지막 next observation은 평가 목록에서 제외한다. 중간 실제 행동은 다음 window row의
+action이므로 별도 endpoint action/log_prob이 필요하지 않다. invalid shape/action/policy는 쓰기 전에
+거절하고 비유한 Target/Error/예상 갱신도 head write 전에 실패한다. 이전 성공 호출을 rollback하지 않는다.
+
+고정 π는 caller-owned floating Tensor (S,A), 각 행의 유한 확률합 1, Q와 같은 device다.
+선택 rows를 Q dtype으로 명시적으로 cast한다. Q 갱신으로 π를 개선하지 않는다.
+동적 π는 기존 Selector 객체를 전달하며 `probabilities(estimate)`를 사용한다. 반환 확률은 Q와
+shape/dtype/device가 같아야 한다. Model.forward나 행동 선택을 다시 호출하지 않으므로 같은
+Snapshot 및 RNG 불변 계약을 유지한다. 이 경로는 동적 Target의 계산 지원이며 새로운 Control
+실험이나 Policy Framework를 구현한 것이 아니다.
+
+### Online 시점, 경계와 수치 검증
+
+매 Step 이후 Transition을 pending에 추가하고 len==n이면 oldest row를 갱신한 뒤 pop한다.
+종료가 아니면 그 **갱신 이후** 다음 Behavior 행동을 선택한다. 이는 n=1 Expected SARSA와
+같은 타이밍이다. SARSA 예제의 next-action-before-update 수집 함수를 그대로 호출하지 않는다.
+n=3, T=5의 갱신 시점은 Step 3/4/5/5/5이고 각 Transition을 한 번씩 처리한다.
+
+terminated=True는 Bootstrap을 제거하고 두 flag가 True여도 이 규칙이 우선한다.
+truncated-only는 actual final observation의 ΣπQ로 Bootstrap하며 마지막 행동을 샘플링하지 않는다.
+flush에는 step/act가 없고 각 학습 호출은 앞선 갱신이 반영된 최신 Q를 다시 평가한다.
+하나의 호출 내부 Snapshot 고정과 전체 flush의 Q 동결은 다르다.
+
+| 검증 | Return/Target | signed Error | 갱신 후 Q (초기 2, alpha=.5) |
+|---|---|---|---|
+| n=1, Qnext=[10,2], π=[.25,.75], reward=1 | 4.6 | 2.6 | 3.3 |
+| n=3, rewards=[1,2,3], 실제 A1=0/A2=1 | 역순 6.6 → 6.536 → 3.8206 | 1.8206 | 2.9103 |
+| m=2 자연 종료 | head 2.8, tail 2 | .8 (head) | 2.4 |
+| m=2 Time-limit | head 3.61, tail 5.6 | 1.61 (head) | 2.805 |
+
+n=1 동적 Selector는 기존 Expected SARSA와 float32/64, 종료/Truncation/동시 flag에서
+Action/Reward/Target/Error/Q/Step/RNG가 정확히 일치한다. π=0의 중간 분기에도 다른 행동의
+기대값 항과 갱신은 남는다. n=1/3/5의 결정적 π를 실제 경로가 따르면 Sampled SARSA와
+Return이 같지만 일반 확률적 π의 n>1에서는 일치하지 않는다.
+반복 self-transition의 Q=[4,10], rewards=[1,2], π=.5, gamma=.9/alpha=.5는
+첫 Snapshot [[4,10],[4,10]]에서 Target=9.235/Qnew=6.6175, 다음 flush에서
+Target=9.477875/Qnew=8.0476875다. 매 호출 한 Snapshot과 최신 flush Q를 검증한다.
+
+### 고정 정책 비교와 Checkpoint
+
+Seeds7/11/19, n=1/3/5, 200 Episode, gamma=.9, alpha=.05, Behavior epsilon=1이다.
+Matched π=.25, Different π=[.3,.2,.2,.3]을 고정한다. On-policy Uniform 기준은 기존 SARSA
+함수를 재사용하고, Off-policy SARSA의 matched/different 및 Tree 두 정책을 각각 실행한다.
+`policy_evaluation`과 `action_values`의 동일 π Qπ를 비종료 10개 상태·모든 행동에 대해 비교한다.
+Reward/Length, Step/실제 Update, Q/π, RMSE 곡선과 Seed 평균·표준편차를 보존한다.
+Tree에는 Weight/ESS를 계산하지 않는다. 고정 정책 평가를 최적 제어 성공으로 해석하지 않는다.
+
+Uniform Behavior의 자연 종료 경험은 방법 간 Action/Reward/Length/Step이 같다.
+단, SARSA는 Time-limit 마지막 행동을 추가로 선택하고 Tree는 선택하지 않아, Truncation 뒤 RNG·
+경험까지 동일하다고 가정하지 않는다. 그 경우 각 방법의 독립적인 seed 재실행으로 재현성을 검증한다.
+Tree의 단일 Seed 우위나 RMSE 단조 감소를 테스트 조건으로 두지 않는다.
+
+실제 200 Episode 비교 결과(각 행의 SARSA는 Off-policy 버전, Matched는 On-policy 기준과 정확히 같다):
+
+| Seed | n | Step=Update (각 run) | Matched SARSA / Tree RMSE | Different SARSA / Tree RMSE |
+|---|---|---|---|---|
+| 7 | 1 | 8,419 | .074577 / .097615 | .071736 / .088023 |
+| 7 | 3 | 8,419 | .113803 / .071858 | .166660 / .061638 |
+| 7 | 5 | 8,419 | .144084 / .070951 | .213516 / .060784 |
+| 11 | 1 | 8,412 | .104793 / .101074 | .098586 / .092793 |
+| 11 | 3 | 8,412 | .053557 / .075692 | .073633 / .066914 |
+| 11 | 5 | 8,412 | .076829 / .074770 | .110648 / .066053 |
+| 19 | 1 | 8,774 | .127772 / .124823 | .124573 / .119835 |
+| 19 | 3 | 8,774 | .088591 / .097037 | .102298 / .090675 |
+| 19 | 5 | 8,774 | .106447 / .096101 | .131470 / .089769 |
+
+Different RMSE 평균±표준편차(SARSA / Tree)는 n=1에서 .098298±.021572 / .100217±.014008,
+n=3에서 .114197±.038899 / .073076±.012630, n=5에서 .151878±.044406 / .072202±.012607이다.
+Tree Matched는 n=1/3/5에서 .107838±.012094 / .081529±.011077 / .080607±.011066이다.
+45개 run은 총 9,000 Episode, 384,075 Step/Update이며 모두 자연 종료했다. 동일 π별 DP 기준을 사용한다.
+n=1 평균은 Tree가 약간 높고, n=3/5 평균은 낮지만 고정 alpha와 세 Seed의 유한 표본 관측이다.
+Reward/Length는 Uniform Behavior가 같아서 일치하며 이 곡선을 Target Policy의 제어 성능으로 해석하지 않는다.
+
+Checkpoint는 Model.state_dict, 고정 π 또는 동적 Selector의 구조/ε, owned pending batches,
+현재 관측·이미 선택한 Behavior action/log_prob, n/gamma/alpha와 Torch CPU/CUDA RNG를 보존한다.
+실제 환경 도중 재개는 환경 위치/RNG/TimeLimit 잔여 예산·누적 통계도 별도 보존해야 한다.
+테스트는 고정 stream에서 pending/선택 행동을 복원하여 후속 모든 Error/Q 및 다음 행동이
+일치하는지 확인한다. 범용 환경 Checkpoint 클래스/API는 추가하지 않는다.
+
+### 구조적 평가와 Q(σ) 요구사항
+
+- 기존 Model/Estimator는 그대로 사용하고 Selector.probabilities로 동적 π의 기대값·분기 확률을
+  계산할 수 있었다. TD0는 외부 continuation을 받아 Tree의 모든 재귀 Bellman Backup에 재사용된다.
+- Ordered B=1 window와 검증·comparator는 재사용한다. deque 수집/head/pop/flush 및 실험 집계는
+  다른 예제와 겹치지만 행동 선택 타이밍이 달라 기존 수집 함수와 억지로 공유하지 않는다.
+- Tree의 추가 입력은 중간 실제 행동과 같은 Snapshot의 Q/π rows다. 실행된 행동은 기존
+  Transition/Batch로 충분하고 sampled endpoint나 Behavior probability는 필요하지 않다.
+- 기존 Q/SARSA Learner는 Batch의 max/gather Bootstrap을 고정하며 recursive return/temporal window
+  조합 경로를 제공하지 않는다. 계산 컴포넌트는 충분하여 예제 함수만으로 구현할 수 있었다.
+  신규 Learner나 기존 Learner 리팩터링은 하지 않는다.
+- 최소 공통화 후보는 ordered window, actual horizon/boundary, 같은 Snapshot의 Q/π 및 실제
+  중간 행동을 받는 Return 조합 함수와, 행동 선택 시점을 명시한 학습 callback이다.
+  endpoint bootstrap 교체만으로 Tree Backup의 모든 중간 분기를 표현할 수 없다.
+- Q(σ)는 시점별 σ, sampled/expected 혼합, 중간 Q/π, 실제 행동 및 필요한 Off-policy 보정의
+  선택·기록·평가 시점이 추가로 필요하다. Off-policy sampling 성분에는 과거 b의 기록이 필요할 수 있다.
+  현재 Transition.log_prob을 활용할 수 있지만 σ의 소유권과 mixing/ratio 범위는 먼저 설계해야 한다.
+  Q(σ), 공통 Framework, Target Policy Control은 이번에 구현하지 않는다.
+
+06 Notebook §16은 예제 함수로 같은 실험을 실행하고 이전 69개 셀·출력·메타데이터를 그대로 보존한다.
+전체 pytest는 1,693 passed, 53 skipped(CUDA 미지원)이며 신규 테스트는 92 passed/8 skipped다.
+기존 예제 14개의 Smoke Test와 세 Notebook의 같은 Kernel Run All 두 번을 통과했다.
+기존 모든 출력 payload도 이전 commit과 일치하며 새 그래프 두 개를 포함한 PNG는 총 32개다.
+현재 06은 87개 셀/코드 47개/PNG 17개이고 라이브러리 61개 파일의 byte hash는 변경되지 않았다.
+
 ## DQNLearner와 CartPole 검증
 
 `learner/dqn.py`의 DQNLearner는 외부 Online Model, Target Model, Optimizer,
@@ -1969,7 +2115,7 @@ seed7, 1,000 Episode·5,701 Step 이후 Greedy는 5 Step·보상 +1이었다. Q/
 SARSA는 γ=.9, α=.8, ε=.1, Seed7의 1,000 Episode/8,604 Step 이후 Greedy 5 Step/+1을 보였다.
 직접 Next Action을 재사용하는 루프와 다중 Seed 비교 루프의 Q가 일치하며 비교 결과는 위에 기록한다.
 Greedy 정책·학습 Reward/Length/Step 그림 2개를 추가했다. Expected SARSA §12, Double Q-learning §13,
-Online n-step SARSA §14와 Off-policy n-step 고정 정책 평가 §15는 예제 함수 조합으로 검증하며 그림 2개씩 추가해 총 30개 PNG와 텍스트·수치가
+Online n-step SARSA §14, Off-policy n-step 고정 정책 평가 §15, Tree Backup §16은 예제 함수 조합으로 검증하며 그림 2개씩 추가해 총 32개 PNG와 텍스트·수치가
 두 Run All에서 일치했다. 기존 06의 49개 셀 전체(코드 23개)의 소스·출력·실행 번호·메타데이터도 이전 commit과 같다.
 최종 전체 pytest는 1,479 passed, 37 skipped(CUDA 미지원)였으며 본체 추적 파일 61개는 변경하지 않았다.
 

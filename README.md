@@ -924,7 +924,38 @@ episode rewards/lengths, steps/updates, Q, rho statistics and effective sample s
 [ARCHITECTURE.md](docs/ARCHITECTURE.md#off-policy-n-step-sarsa-컴포넌트-조합-검증)
 describes coverage, checkpoint ownership and remaining collection-code overlap.
 The existing 59 cells and outputs of `06_td_modularrl.ipynb` are preserved.
-Control, n-step Expected SARSA, Tree Backup and Q(sigma) remain future work.
+Control, n-step Expected SARSA and Q(sigma) remain future work.
+
+## Online n-step Tree Backup component composition
+
+```bash
+python -m examples.gridworld_tree_backup --episodes 200 --seeds 7 11 19 --ns 1 3 5
+```
+
+`learn_tree_backup(model, window, target_generator, update_rule, target_policy=pi)`
+updates the oldest ordered B=1 record using the existing components. A fixed
+floating policy table `(S,A)` or an existing discrete Selector can supply `pi`.
+Dynamic `Selector.probabilities(estimate)` reads the same pre-update Q snapshot
+used for the return. Fixed rows are explicitly cast to the Q dtype; devices match.
+
+The final bootstrap is `sum(pi * Q)`. Intermediate sampled actions come from the
+window; their branches carry the recursive return while other branches use Q.
+Each `reward + gamma * continuation` uses TD0TargetGenerator, followed by the
+unchanged TabularQUpdateRule. The returned `(1,)` Tensor is signed `G-current_Q`
+with no graph. No importance ratio, effective target or bootstrap action is needed.
+
+The online loop updates before selecting the next behavior action. n=1 therefore
+matches Expected SARSA, including action/RNG timing. Termination removes bootstrap;
+truncation bootstraps from the final observation's expectation without sampling an
+extra action. Each residual update reads current Q again after earlier writes.
+
+The example reuses the existing on/off-policy SARSA comparators with uniform
+behavior, gamma=.9, alpha=.05 and matched/different fixed targets. It reports each
+policy's DP Qpi RMSE, reward/length, steps/updates, tables and seed statistics.
+Tutorial §16 calls the same functions and preserves all previous 69 cells/outputs.
+No library file, public API or Learner class is changed. Remaining recursive-return
+and collection-interface limits are documented in
+[ARCHITECTURE.md](docs/ARCHITECTURE.md#online-n-step-tree-backup-컴포넌트-조합-검증).
 
 ## Examples
 

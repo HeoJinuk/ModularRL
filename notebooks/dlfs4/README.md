@@ -92,6 +92,7 @@ Episode를 학습하지 않고 비교를 중단한다. TD/Q는 terminated에서�
 | Double Q-learning 조합 검증 확장 | 06 §13 | 두 Model.forward, EstimatorOutput, 기존 Selector.select, TD0TargetGenerator, TabularQUpdateRule | 실행 완료·예제 함수 | 독립 table·Q 합 Behavior·교차 Bootstrap; 원본 Gaussian Bias 실험은 현재 환경 계약으로 정확히 표현 불가 |
 | Online n-step SARSA 확장 | 06 §14 | Model.act/forward, Transition.to_batch, TD0TargetGenerator 역순 합성, TabularQUpdateRule | 실행 완료·예제 함수 | deque의 B=1 시간순 window; actual action 유지·boundary flush, TDN/SequenceReplay는 현재 없음 |
 | Off-policy n-step SARSA 확장 | 06 §15 | 기존 Model/Selector, Transition.log_prob, TD0 역순 합성, Q UpdateRule | 실행 완료·고정 정책 평가 예제 | 현재 행동 제외·sampled 끝점 포함 IS, π=b 동등성, π≠b의 동일 π DP Q 비교 |
+| Online n-step Tree Backup 확장 | 06 §16 | Model의 Q Snapshot, Selector.probabilities, TD0 역순 합성, Q UpdateRule | 실행 완료·예제 함수 | 중간 실제 행동 분기·π/Q 재귀, Expected Bootstrap, IS/끝점 행동 선택 없음 |
 | common/gridworld.py: GridWorld | 세 Notebook 환경 구성 | dlfs4_gridworld, make_dlfs4_gridworld_env, TabularEnv, DLFS4_STATES/START_STATE | 실행 완료 | DP의 알려진 kernel과 Gymnasium 실행 환경 분리; compact State ID |
 | common/gridworld_render.py: Renderer | 세 Notebook 결과 표시 | plot_grid, Matplotlib | 실행 완료·간소화 | Q 삼각형 대신 행동별 heatmap; 목표 V=0과 진입 +1 구분 |
 | common/utils.py: argmax/greedy_probs/plot_total_reward | 06 §8–10 | ActionSelector.select/probabilities, plt.plot | 실행 완료·대체 | 원본 무작위 단일 argmax와 달리 동률 집합의 정확한 확률 사용 |
@@ -219,8 +220,8 @@ Control 단일 표본 reward=4/b=.25는 Q=4/C=1, 두 단계 rewards=[1,3]은 Q=[
 SARSA 수치 예제의 a′=1은 Error=-1.2/Q=3.4, a′=0은 Error=6/Q=7, terminal은 Error=-3/Q=2.5다.
 직접 루프와 비교 루프의 Seed7 Q는 일치한다. 종료·Truncation·선택 횟수/실행 재사용·Batch/Online
 차이·dtype/device·Model 복원을 결정적으로 검증한다. Seed19의 Greedy cutoff도 그대로 보고한다.
-전체 pytest는 1,601 passed, 45 skipped(CUDA 미지원)다. 세 Notebook Run All 두 번의
-텍스트·수치·30개 PNG는 일치했고 기존 06 Notebook의 59개 셀 전체(코드 28개)는 이전 commit과 같다.
+전체 pytest는 1,693 passed, 53 skipped(CUDA 미지원)다. 세 Notebook Run All 두 번의
+텍스트·수치·32개 PNG는 일치했고 기존 06 Notebook의 69개 셀 전체(코드 34개)는 이전 commit과 같다.
 quickstart·DP/MC/TD/On/Off-policy MC·FrozenLake·CartPole Smoke Test도 통과했다.
 
 Expected SARSA 추가 실험은 학습 중 Reward/Length와 누적 Step을 기록한다. Seed7의 학습 cutoff 23회와
@@ -250,9 +251,23 @@ Notebook 100 Episode의 Different Qpi RMSE는 n=1/3/5에서 세 Seed 평균±표
 .209765±.014594 / .111875±.011099 / .135703±.015378이다. CLI 200 Episode 결과는
 [ARCHITECTURE.md](../../docs/ARCHITECTURE.md#off-policy-n-step-sarsa-컴포넌트-조합-검증)에 기록한다.
 
+Tree Backup §16은 같은 Snapshot의 Q/π에서 중간 실제 행동 분기를 재귀하고 마지막은 ΣπQ로
+Bootstrap한다. n=1은 기존 Expected SARSA의 Action/Target/Error/Q/RNG와 정확히 같으며 n=3의
+Target=3.8206, Error=1.8206, Qnew=2.9103을 확인한다. 자연 종료의 짧은 Targets=[2.8,2],
+Time-limit은 [3.61,5.6]이고 Bootstrap용 행동은 추가로 선택하지 않는다. π=0은 다른 행동의
+기대값을 남기며 π=1은 G를 그대로 전달한다. Behaviour log_prob이나 IS Weight를 사용하지 않는다.
+
+200 Episode·Seeds7/11/19·n=1/3/5의 45개 비교 run은 384,075 Step=Update였고 모두 자연 종료했다.
+Different Target의 Tree RMSE 평균±표준편차는 n=1/3/5에서
+.100217±.014008 / .073076±.012630 / .072202±.012607이다. n=1은 SARSA보다 평균이 약간 높고,
+n=3/5는 낮은 관측값이지만 성능 보장은 아니다. On-policy 기준·SARSA·Matched 값과 Seed별 수치는
+[ARCHITECTURE.md](../../docs/ARCHITECTURE.md#online-n-step-tree-backup-컴포넌트-조합-검증)에 기록한다.
+현재 06 Notebook은 87개 셀, 코드 47개, PNG 17개이며 이전 69개 셀·출력·메타데이터를 모두 보존한다.
+
 ## 최소 확장 제안
 
 - MC Control 확장: 현재 Sample Average와 별도로 원본 고정 α 갱신·GLIE 등의 의미를 설계한다. 이번 구현에 이미 포함됐다고 간주하지 않는다.
-- SARSA 확장: Expected SARSA는 §12, Online n-step은 §14, 고정 π Off-policy n-step은 §15 예제 조합으로 검증한다. Tree Backup/Q(σ)의 분기·확률 계약은 별도로 설계하며 Transition 필드를 임의로 추가하지 않는다.
+- SARSA 확장: Expected SARSA는 §12, Online n-step은 §14, 고정 π Off-policy n-step은 §15 예제 조합으로 검증한다. Q(σ)의 혼합·확률 계약은 별도로 설계하며 Transition 필드를 임의로 추가하지 않는다.
+- Tree Backup 확장: §16에서 고정 π의 중간 분기·Expected Bootstrap을 기존 컴포넌트로 조합한다. Q(σ)의 sampled/expected 혼합 및 Off-policy 보정 계약은 별도로 설계한다.
 - Off-policy 확장: 현재 V Prediction·Weighted Q Control·n-step 고정 정책 평가와 구분해 Per-decision IS와 n-step Control의 계약을 별도로 설계한다.
 - 제자리 DP: 필요할 때 별도 모드의 수치 의미를 설계한다. Notebook 단순화를 위해 지금 추가하지 않는다.
