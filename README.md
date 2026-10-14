@@ -957,6 +957,30 @@ No library file, public API or Learner class is changed. Remaining recursive-ret
 and collection-interface limits are documented in
 [ARCHITECTURE.md](docs/ARCHITECTURE.md#online-n-step-tree-backup-컴포넌트-조합-검증).
 
+## n-step Q(sigma) composition
+
+```bash
+python -m examples.gridworld_q_sigma --episodes 200 --seeds 7 11 19 --ns 1 3 5
+```
+
+`learn_q_sigma(model, window, target_generator, update_rule, target_policy=pi, sigma=.5)`
+uses the textbook's Eq. 7.17 with control variates. A scalar or frozen per-time
+sigma vector mixes intermediate `pi/b` and target action probabilities. Existing
+Model, TabularQEstimator, Selector, TransitionBatch, TD0TargetGenerator and
+TabularQUpdateRule remain unchanged; no Learner class is added.
+
+The nonterminal horizon uses expected Q; termination ends at the last reward.
+Truncation uses the actual final observation, with no extra action during flush.
+Sigma=0 matches Tree Backup exactly. Sigma=1 includes control variates and need
+not match ordinary sampled SARSA on each trajectory. No whole IS product is
+applied again. The textbook's prose/pseudocode boundary discrepancy and the
+explicit choice of its mathematical definition are documented in
+[ARCHITECTURE.md](docs/ARCHITECTURE.md#n-step-qσ-컴포넌트-조합-검증).
+
+Tutorial §17 preserves all prior 87 cells and calls the same example functions.
+It compares fixed-policy DP Qpi RMSE over three seeds, six sigma settings and
+reuses the existing SARSA/Tree results. The CLI additionally covers n=1/3/5.
+
 ## Examples
 
 ```python

@@ -2344,3 +2344,221 @@ feature 크기 오류는 일반적으로 Network 연산에서 보고한다. Cont
 검증 명령은 프로젝트 루트에서 `python -m pytest -q`와
 `python -m examples.quickstart`다. CPU에서 dtype, gradient, checkpoint와
 Model/ActionSelector 연결을 검증하며, CUDA는 사용 가능한 환경에서 실행한다.
+
+## n-step Q(σ) 컴포넌트 조합 검증
+
+`examples/gridworld_q_sigma.py`는 기존 컴포넌트로 고정 정책의 Qπ를 추정하는 예제다.
+`modular_rl/`와 기존 API, Transition 필드, Learner 클래스는 변경하지 않는다.
+기준은 Sutton & Barto 2판 §7.6 본문 식 (7.17), 인쇄 쪽수 155–156이다.
+[기준 PDF](https://www.andrew.cmu.edu/course/10-703/textbook/BartoSutton.pdf#page=177).
+
+### 기준 수식과 본문/의사코드의 차이
+
+```text
+Vbar_k = sum_a pi(a|S_k) Q(S_k,a)
+rho_k  = pi(A_k|S_k) / b(A_k|S_k)
+c_k    = sigma_k * rho_k + (1-sigma_k) * pi(A_k|S_k)
+G_j:h  = R_(j+1) + gamma * [Vbar_(j+1) + c_(j+1) * (G_(j+1):h - Q(S_(j+1),A_(j+1)))]
+Q(S_t,A_t) += alpha * (G_t:h - Q(S_t,A_t))
+```
+
+Q와 π는 한 호출 안에서 업데이트 전 동일 Snapshot이다. σ·Behavior log b는 실제 행동
+선택 시 결정한 값이다. 현재 head의 σ·ρ를 적용하지 않고 실제 중간 행동만 보정한다.
+Control Variate는 중간 `Vbar-Q(sampled)` 항을 보존한다. σ=1을 일반적인 sampled SARSA와
+표본별로 같다고 가정하거나, σ=0/1 최종 Target을 단순 선형보간하지 않는다.
+
+비종료 Horizon의 본문 경계는 `G_h:h = Q(S_h,A_h)`다. 따라서 마지막 residual은 0이며
+`G_(h-1):h = R_h + gamma*Vbar_h`로 시작한다. 끝점 행동·log b·σ_h는 필요 없다.
+자연 종료는 `G_(T-1):T = R_T`다. 일반적 Time-limit은 실제 final observation의 기대값으로
+Bootstrap한다. 두 flag가 True면 terminated가 우선한다. Boundary flush는 step/act를 호출하지 않는다.
+
+같은 페이지 의사코드는 `G=0`으로 시작하여 본문의 비종료 경계와 다른 결과를 낸다.
+이번 구현은 사용자와 확정한 **본문 정의**를 선택한다. 공식 정오표에서 확인하지 못했으므로
+공식적으로 인정된 오류라고 단정하지 않는다. 사용자 n=3 예제에서 본문 방식의
+Target/Qnew는 3.303325/2.6516625지만, 의사코드 초기화를 문자 그대로 적용하면
+1.437540625/1.7187703125다. σ=0의 Tree Backup 동등성도 후자는 보존하지 않는다.
+
+본문은 Return 뒤에 일반 Off-policy 업데이트 (7.11)을 참조한다. (7.11)의 전체 비율을
+이미 `c_k`로 보정한 (7.17)에 다시 곱하면 선택한 정의에서 중복 보정이 된다.
+상자 의사코드의 직접 `alpha*(G-Q)` 및 이번에 승인한 계약대로 별도 전체 IS 비율을 곱하지 않는다.
+이 업데이트 해석과 Horizon 초기화 선택을 명시하며, 본문·상자를 완전히 동일하다고 기술하지 않는다.
+
+### Control Variate를 쓰지 않는 On-policy 표현과의 구분
+
+[De Asis 외, AAAI 2018의 식 (13–14)](https://cdn.aaai.org/ojs/11631/11631-13-15159-1-2-20201228.pdf#page=4)는
+`delta_sigma = R + gamma*[sigma*Q(sampled) + (1-sigma)*Vbar] - Q(current)`를 사용한다.
+동일 Snapshot의 On-policy 재귀로 표현하면 `c_on=sigma+(1-sigma)*pi(sampled)`와
+`C_alt=sigma*Q(sampled)+(1-sigma)*Vbar+c_on*(G-Q(sampled))`다.
+이번에 선택한 본문 정의의 `C_cv=Vbar+c_on*(G-Q(sampled))`와는
+`sigma*(Vbar-Q(sampled))`만큼 다르다. 대체 정의는 끝점에도 sampled/expected 혼합을
+사용하여 sigma=1에서 일반 Sampled SARSA를 얻지만, 이번 본문 경계는 끝점이 항상 기대값이다.
+이를 별도의 구현 모드로 추가하지 않는다. 해당 논문의 Off-policy 보정 방식을 이번 식 (7.17)에
+옮겨 섞지도 않는다. 여러 Q(σ) 정의의 이름이 같다는 이유로 표본별 동등성을 주장하지 않는다.
+
+### 공개 예제 함수와 데이터 계약
+
+- `learn_q_sigma(model, window, target_generator, update_rule, *, target_policy, sigma)`:
+  연속된 owned B=1 TransitionBatch Window에서 head 한 행만 갱신한다.
+  반환 dict의 `target`, signed `td_error`는 graph 없는 `(1,)`의 table dtype/device Tensor다.
+  `importance_ratios`, `coefficients`는 실제 중간 시점의 순서대로 float64 `(m-1,)`다.
+  빈 중간 구간(n=1)에는 빈 통계 Tensor를 반환한다. Sampling은 수행하지 않는다.
+- `sigma`는 고정 Scalar 또는 `[σ_(t+1),…,σ_(t+m)]`의 m개 frozen 값이다.
+  마지막 값은 유효 범위를 검사하는 placeholder로 Return에 영향을 주지 않는다.
+  Callback은 learn에 전달하지 않는다. 고정 σ=0은 Tree의 π=0/1 shortcut과 같은 계산을 사용한다.
+- `target_policy`는 고정 floating `(S,A)` Tensor 또는 기존 discrete Selector다.
+  Fixed Policy는 table device여야 하며 Tree와 동일하게 필요한 행을 Q dtype으로 변환한다.
+  Dynamic `probabilities(estimate)`는 Return의 Q와 같은 단일 Model estimate를 읽으며 RNG를 소비하지 않는다.
+- `run_episode(env, model, target_generator, update_rule, *, target_policy, sigma=.5, n=3, seed=None)`:
+  reset/step 기반 Online 수집·n-step scheduling·boundary flush를 수행한다.
+  σ는 Scalar, 반복 시간 패턴 또는 `callback(state, action, timestep)`이다.
+  패턴의 timestep은 Episode마다 0부터 시작한다. 다음 행동은 eligible head 갱신 뒤 선택한다.
+- `train_and_evaluate(...)`는 Uniform Behavior와 matched/different 고정 Target으로 DP Qπ RMSE,
+  Reward/Length, 누적 Step=Update, 종료 flag, frozen σ 및 c·ρ 통계를 반환한다.
+  `run_comparison(..., reference_results=None)`은 기존 SARSA/Tree 실험 함수를 재사용한다.
+  Notebook에서는 이미 실행한 동일 설정 결과를 전달해 비교 실험을 중복 실행하지 않는다.
+  전달한 결과는 seed/budget/n/gamma/alpha를 검사하며 환경 TimeLimit 설정도 호출자가 일치시킨다.
+
+### Snapshot, Sampling-time 메타데이터와 수치 안전성
+
+Window/인덱스/경계 검증은 원래 n-step SARSA 함수, 정책 및 log b 검증은 기존 Off-policy 예제,
+확률 조회·Q 갱신 사전 검사는 Tree Backup의 작은 함수를 재사용한다. 새 예제는 일반 Python
+import를 사용한다. 이전 Tree/Off-policy 파일 내부의 runpy 로딩은 변경하지 않으며 새 runpy
+체인을 추가하지 않는다. Notebook은 예제 디렉터리를 표준 namespace package로 한 번 등록한다.
+설치 패키지를 늘리거나 sys.path를 수정하지 않는다.
+
+각 필요한 next state의 Q와 π를 한 번에 평가한다. Tabular lookup의 advanced-index 결과는
+테이블과 독립인 Tensor이며, 동적 Selector도 같은 estimate에서 확률을 구한다.
+Return을 모두 계산하고 수치를 검사한 뒤 원본 table의 head를 기존 Rule로 한 번 갱신한다.
+반복 상태·행동이 들어와도 현재 호출은 한 Snapshot이고, 후속 flush 호출은 앞선 갱신 후 Q를 읽는다.
+
+기존 TransitionBatch의 log_prob에 실제 sampling-time `log b`를 저장한다. 현재 epsilon/Q로
+과거 확률을 재계산하지 않는다. `.to(dtype=table.dtype)`가 log b도 변환할 수 있으므로 IS에는
+원본 record의 precision을 유지한 값을 float64로 옮겨 사용한다. π=0이면 rho=0으로 처리해
+`0*inf`를 만들지 않고, 기대값은 남겨 해당 sampled residual 분기만 끊는다.
+Coverage `π>0 ⇒ b>0`는 호출자 책임이며, 관측한 행동의 log b만으로 미관측 행동의 support는
+확인할 수 없다. Uniform Behavior 실험은 모든 행동에 b=1/4를 보장한다.
+
+σ의 finite [0,1], 로그의 finite ≤0, 정책 확률/정규화와 Shape·인덱스를 검사한다.
+양수 ratio overflow/underflow, table dtype의 coefficient 표현 불가, correction/update 곱의
+underflow, 비유한 Snapshot/Return/TD error/제안 Q는 **쓰기 전에** 실패한다. Clipping하지 않는다.
+실패한 호출의 head/window는 pop하지 않으며 이전 성공한 Online 호출까지 되돌리지는 않는다.
+본 실험은 학습계산의 graph를 보존하지 않는다. core TargetGenerator의 gradient 계약은 그대로다.
+
+### 결정적인 수치 검증
+
+| 조건 | Target | Qnew (현재 Q=2, α=.5) |
+|---|---:|---:|
+| n=1, 다음 Q=[10,2], π=[.25,.75], γ=.9, r=1, 모든 σ | 4.6 | 3.3 |
+| n=3, σ=[.5,.25,.75], 아래의 중간 행동·확률 | 3.303325 | 2.6516625 |
+| 같은 n=3, 고정 σ=0 (Tree Backup) | 3.8206 | 2.9103 |
+| 같은 n=3, 고정 σ=.5 | 3.17575 | 2.587875 |
+| 같은 n=3, 고정 σ=1 (Control Variate) | 2.3608 | 2.1804 |
+| 같은 n=3, 일반 Sampled SARSA, A3=0 | 9.604 | 5.802 |
+
+n=3은 rewards=[1,2,3], S1 Q=[10,2]/π=[.25,.75]/A1=0/b=.5,
+S2 Q=[4,8]/π=[.6,.4]/A2=1/b=.25, S3 Q=[6,2]/π=[.5,.5]다.
+시점별 σ의 rho=[.5,1.6], c=[.375,.7], 역순 G=[6.6,6.158,3.303325]를 독립 검증한다.
+σ_h를 0/.25/.75/1로 바꿔도 마지막 residual=0이므로 결과는 같다.
+고정 σ=.5 Target은 σ=0/1 Target 평균 3.0907과 다르다.
+
+σ=1에서도 π=b의 중간 `Vbar-Q(sampled)`가 일반적으로 0은 아니다. Deterministic π=b가
+실제 경로를 따르는 경우나 관련 Q가 행동에 무관한 경우 등에는 Sampled Return과 일치한다.
+일반 확률적 정책의 표본별 동등성은 요구하지 않는다. n=1의 Sampled Target은 선택한 마지막
+행동 Q를 쓰지만 본문 정의는 기대값이므로 두 Target은 첫 단계부터 다를 수 있다.
+
+### Checkpoint와 범용성 평가
+
+1. Model/TabularQEstimator/기존 EpsilonGreedySelector는 그대로 재사용한다.
+2. Transition/TransitionBatch의 필드와 공개 API를 변경하지 않는다.
+3. TD0TargetGenerator는 각 `reward + gamma*continuation`을, Q Rule은 직접 table 갱신을 담당한다.
+4. 시점별 σ는 예제의 `pending_sigmas` deque에 현재 observation/action과 정렬해 저장한다.
+   learn에는 tail σ와 무효 영향의 Horizon placeholder를 전달한다. provider는 선택 시 한 번만 호출한다.
+5. Q·π는 단일 Model estimate에서 같은 시점의 Snapshot으로 계산한다.
+6. sampling-time 행동 log b는 기존 record, 현재 아직 실행하지 않은 action/log b/σ는 별도 수집 상태다.
+7. Online scheduling/flush의 핵심은 On-policy 약 30줄, Off-policy 약 40줄, Tree 약 30줄과
+   Q(σ)의 약 45줄에서 반복된다. Q(σ)는 aligned σ와 branch 통계가 추가된다.
+   서로 다른 next-action 선택 시점과 endpoint 계약을 숨기지 않아 수집 루프를 강제로 공유하지 않았다.
+8. 기존 Learner의 고정 max/gather 경로에는 중간 Q·π·σ를 쓰는 재귀를 외부에서 주입할 수 없다.
+   기존 컴포넌트 출력은 이 계산을 표현할 수 있지만 시간 순서·Snapshot·σ 책임은 예제에 남는다.
+9. TargetGenerator의 reward 수식과 UpdateRule의 table 갱신은 잘 분리돼 있다.
+   여러 시점의 continuation/IS/CV 계산을 받을 공통 Return 인터페이스는 현재 없다.
+10. 최소 공통화 후보는 owned ordered window, 실제 horizon/boundary, Online eligible-head/flush,
+    sampling-time action metadata, target probability provider, frozen Q snapshot, Return→Rule 연결이다.
+    endpoint callback 하나만으로 일반 재귀를 표현할 수 없다. 알고리즘별 재귀/importance 범위를
+    거대한 조건문에 합칠 필요도 없다. 이번 Commit에서는 해당 공통화와 기존 예제 리팩터링을 하지 않는다.
+11. 재개에는 Model.state_dict, 고정 π 또는 Selector 구성/ε, pending records, aligned σ,
+    현재 선택 action/log b/σ, provider 설정, n/γ/α, Torch RNG 및 환경 위치/RNG/TimeLimit 잔여 예산을
+    함께 저장한다. 고정 stream의 pending·σ·선택 행동 복원 후 후속 TD error/Q/RNG 일치를 테스트한다.
+    `run_episode` 편의 함수에는 중간 Checkpoint를 내보내거나 복원하는 API가 없다. 중간 재개가
+    필요하면 호출자가 직접 reset/step과 learn을 조합해 이 상태를 소유해야 한다. 테스트는 그
+    명시적 Window 경로의 재개를 검증하며, 임의 Gymnasium 환경의 자동 복원을 보장하지 않는다.
+12. 향후 WorldModel 신뢰도로 σ를 조절하려면 행동 선택 시점의 상태·행동·시간과 함께 모델 예측의
+    불확실성/신뢰도 및 provider 설정을 명시적으로 제공해야 한다. Callback의 closure로 참조할 수
+    있지만 선택 시 계산한 σ를 저장한다. 학습 시 갱신된 WorldModel로 과거 σ를 다시 정하지 않는다.
+
+```bash
+python -m examples.gridworld_q_sigma --episodes 200 --seeds 7 11 19 --ns 1 3 5
+```
+
+CLI는 γ=.9/α=.05와 고정 σ=0/.25/.5/.75/1 및 시간 패턴[0,1]을 비교한다.
+Notebook §17은 n=3의 같은 6개 설정과 3개 Seed를 실행하며 §16의 비교 결과를 재사용한다.
+각 Target 자체의 DP Qπ를 기준으로 비종료 상태·모든 행동 RMSE를 기록한다. 통계는 update별
+중간 branch에 대한 것이므로 같은 실제 행동이 서로 다른 Window에서 반복 집계될 수 있다.
+Uniform Behavior에서 자연 종료 경험은 모두 같고 Q(σ)/Tree는 Truncation에도 같은 수집 순서다.
+SARSA는 Truncation에서 별도 endpoint action을 선택하므로 그 이후의 RNG/경험 일치는 강제하지 않는다.
+성능 순위나 단일 Seed의 RMSE 감소를 테스트 합격 조건으로 삼지 않는다.
+
+### Gridworld 실행 결과 (γ=.9, α=.05, 각 200 Episode)
+
+153개 run(기존 comparator 45개 + Q(σ) 108개), 총 30,600 Episode와 1,305,855 Step=Update를 실행했다. 모든 Episode가 자연 종료했고 Truncation은 0이다. Seed7/11/19의 각 run Step은 8,419/8,412/8,774다. σ=0의 Q/Reward/Length/Step은 Tree와 정확히 같으며, n=1에서는 모든 σ의 Q가 같다.
+
+아래는 π≠b의 DP Qπ RMSE다. [0,1]은 실제 선택 시각의 반복 σ 패턴이며 마지막 Horizon σ는 해당 Return에서 사용하지 않는다.
+
+| n | σ | Seed7 | Seed11 | Seed19 | 평균±표준편차 |
+|---:|---|---:|---:|---:|---:|
+| 1 | 0.0 | 0.088023 | 0.092793 | 0.119835 | 0.100217±0.014008 |
+| 1 | 0.25 | 0.088023 | 0.092793 | 0.119835 | 0.100217±0.014008 |
+| 1 | 0.5 | 0.088023 | 0.092793 | 0.119835 | 0.100217±0.014008 |
+| 1 | 0.75 | 0.088023 | 0.092793 | 0.119835 | 0.100217±0.014008 |
+| 1 | 1.0 | 0.088023 | 0.092793 | 0.119835 | 0.100217±0.014008 |
+| 1 | [0,1] | 0.088023 | 0.092793 | 0.119835 | 0.100217±0.014008 |
+| 3 | 0.0 | 0.061638 | 0.066914 | 0.090675 | 0.073076±0.012630 |
+| 3 | 0.25 | 0.044088 | 0.049285 | 0.069645 | 0.054340±0.011029 |
+| 3 | 0.5 | 0.029966 | 0.034738 | 0.051111 | 0.038605±0.009055 |
+| 3 | 0.75 | 0.019562 | 0.023749 | 0.035969 | 0.026427±0.006961 |
+| 3 | 1.0 | 0.012501 | 0.016183 | 0.024526 | 0.017737±0.005030 |
+| 3 | [0,1] | 0.032931 | 0.040662 | 0.056554 | 0.043382±0.009834 |
+| 5 | 0.0 | 0.060784 | 0.066053 | 0.089769 | 0.072202±0.012607 |
+| 5 | 0.25 | 0.040596 | 0.045683 | 0.065585 | 0.050621±0.010783 |
+| 5 | 0.5 | 0.023090 | 0.027462 | 0.042134 | 0.030895±0.008145 |
+| 5 | 0.75 | 0.010723 | 0.014219 | 0.022732 | 0.015891±0.005043 |
+| 5 | 1.0 | 0.004412 | 0.007531 | 0.010218 | 0.007387±0.002372 |
+| 5 | [0,1] | 0.028358 | 0.035869 | 0.050506 | 0.038244±0.009196 |
+
+같은 정책의 비교 결과는 다음과 같다. SARSA/Tree는 기존 함수를 다시 실행했으며 Q(σ)는 중간 Control Variate와 마지막 기대값 때문에 σ=1에도 Target 정의가 다르다.
+
+| n | Target | Off-policy sampled SARSA | Tree Backup / σ=0 | Q(σ=.5) | Q(σ=1) |
+|---:|---|---:|---:|---:|---:|
+| 1 | matched | 0.102381±0.021784 | 0.107838±0.012094 | 0.107838±0.012094 | 0.107838±0.012094 |
+| 1 | different | 0.098298±0.021572 | 0.100217±0.014008 | 0.100217±0.014008 | 0.100217±0.014008 |
+| 3 | matched | 0.085317±0.024704 | 0.081529±0.011077 | 0.045665±0.008253 | 0.021788±0.004861 |
+| 3 | different | 0.114197±0.038899 | 0.073076±0.012630 | 0.038605±0.009055 | 0.017737±0.005030 |
+| 5 | matched | 0.109120±0.027522 | 0.080607±0.011066 | 0.036794±0.007596 | 0.008664±0.002633 |
+| 5 | different | 0.151878±0.044406 | 0.072202±0.012607 | 0.030895±0.008145 | 0.007387±0.002372 |
+
+이 설정에서는 n=3/5에서 σ=1의 평균 RMSE가 작았지만 성능 보장은 아니다. n=1은 모든 σ에서 같고 Sampled SARSA와의 성능 순위도 한 방향이 아니다.
+Branch 통계의 matched rho는 1, different rho는 .8/1.2이며 실제 방문 빈도에 따라 평균이 달라진다. c는 σ=0에서 π, σ=1에서 rho다. n=1에는 중간 Branch가 없으므로 통계 Tensor는 비어 있다. 고정/시점별/Callback σ, Dynamic Selector, 수치 실패, Checkpoint와 CPU/float32·64는 결정적인 테스트로 별도 검증한다.
+
+### 최종 회귀 검증
+
+전체 pytest는 **1,823 passed, 55 skipped(CUDA 미지원)**이며 실행 시간은 43분 57초다.
+신규 Q(σ) 테스트는 130 passed/2 skipped이고 기존 예제 15개 Smoke Test를 통과했다.
+세 Notebook을 각각 같은 Kernel에서 Run All 두 번 실행해 텍스트·수치·PNG가 일치했다.
+기존 출력 payload도 이전 commit과 같고, 새 그림 2개를 포함한 PNG는 총 34개다.
+06 Notebook은 106개 셀/코드 60개/PNG 19개이며 기존 87개 셀·출력·메타데이터와
+루트 metadata를 모두 그대로 보존했다. 기존 라이브러리 61개 Python 파일의 byte hash가 같다.
+
+초기 전체 검증에서는 새 Notebook의 Sampled SARSA 비교 참조값 한 곳이 실패했다.
+이번 Window의 끝점 Q=6인 Target은 9.604인데 다른 예제의 8.146을 옮긴 것이 원인이었다.
+참조값·문서를 정정하고 결정적인 숫자 비교 테스트를 추가한 뒤 전체 검증을 다시 통과했다.
+학습 알고리즘을 참조값에 맞춰 바꾸지 않았다.

@@ -271,3 +271,26 @@ n=3/5는 낮은 관측값이지만 성능 보장은 아니다. On-policy 기준�
 - Tree Backup 확장: §16에서 고정 π의 중간 분기·Expected Bootstrap을 기존 컴포넌트로 조합한다. Q(σ)의 sampled/expected 혼합 및 Off-policy 보정 계약은 별도로 설계한다.
 - Off-policy 확장: 현재 V Prediction·Weighted Q Control·n-step 고정 정책 평가와 구분해 Per-decision IS와 n-step Control의 계약을 별도로 설계한다.
 - 제자리 DP: 필요할 때 별도 모드의 수치 의미를 설계한다. Notebook 단순화를 위해 지금 추가하지 않는다.
+
+## Q(σ) 조합 실습 (§17)
+
+06 Notebook 마지막에 식 (7.17)의 Control Variate 재귀를 추가한다. 기존 87개 셀의
+source·output·metadata는 보존한다. 본문의 비종료 경계 `G_h:h=Q(S_h,A_h)`를 사용하므로
+마지막 기대값에서 시작하고 endpoint 행동/σ를 요구하지 않는다. 156쪽 의사코드 `G=0`과의
+불일치는 공식 정오표에서 확인하지 못한 사항으로 명시한다. 전체 IS 비율을 다시 곱하지 않는다.
+
+예제 함수가 Return/Update를 계산하며 Notebook은 새 Learner나 계산 복제 없이 호출한다.
+σ=0 Tree 동등성, σ=1과 Sampled SARSA의 차이, 시점별 σ와 n=1/3 수치를 출력한다.
+동적 provider는 실제 선택 시 한 번 결정하고 별도 aligned deque로 보관한다. Truncation flush에서
+새 행동을 고르지 않는다. 표준 namespace package로 예제를 import하며 sys.path를 변경하지 않는다.
+
+n=3·각200 Episode·Seeds7/11/19·γ=.9·α=.05에서 σ=0/.25/.5/.75/1 및 패턴[0,1],
+π=b/π≠b를 비교한다. §16의 동일 설정 SARSA/Tree 결과를 재사용하며 Qπ RMSE, 실제 Step=Update,
+Reward/Length, c/ρ 통계와 Q-table을 출력한다. CLI는 n=1/3/5도 검증한다. 두 그림은 Seed 평균·
+표준편차의 Episode RMSE, 환경 Step RMSE와 Q-table을 보여준다. 라이브러리 본체는 변경하지 않는다.
+
+최종 검증: 전체 pytest 1,823 passed/55 skipped(CUDA), 신규 Q(σ) 130 passed/2 skipped,
+기존 예제 15개 Smoke Test 통과. 세 Notebook의 같은 Kernel Run All 두 번은 텍스트·수치·
+총 34개 PNG가 일치한다. 06은 106개 셀/코드 60개/PNG 19개이고 기존 87개 셀·출력·메타데이터와
+라이브러리 61개 Python 소스를 그대로 보존한다. 전체 Gridworld 비교 153개 run은
+30,600 Episode·1,305,855 Step=Update이며 모두 자연 종료했다.
