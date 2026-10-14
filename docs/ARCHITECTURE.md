@@ -580,8 +580,8 @@ SARSA는 탐색을 포함한 행동 정책을 학습하므로 DP Q*를 직접 �
 06 Notebook은 기존 TD(0)/Q-learning을 보존하고 마지막에 SARSA 수치 예제·B=1 Step-by-step·
 독립 다중 Seed 비교와 Greedy/학습 성능 그림을 추가한다. 환경 실행만 Notebook에 두고
 Target/Q 갱신은 Learner의 공개 API에 맡긴다. 직접 SARSA 루프와 비교 루프의 Seed 7 Q도 일치한다.
-Off-policy SARSA와 n-step은 아직 구현하지 않는다. Expected SARSA는 아래의 예제 조합으로 검증하며
-라이브러리 Learner는 추가하지 않는다.
+Off-policy SARSA는 아직 구현하지 않는다. Expected SARSA와 Online n-step SARSA는 아래의 예제 조합으로
+검증하며 라이브러리 Learner는 추가하지 않는다.
 
 ## Expected SARSA 컴포넌트 조합 검증
 
@@ -766,6 +766,108 @@ TargetGenerator는 교차 next_value를 그대로 받고 Rule은 선택된 table
 이번에는 BaseLearner/Bootstrap 계층이나 공개 API를 추가하지 않으며 함수 조합 결과만 기록한다.
 06 Notebook §13는 같은 예제 함수를 로드해 표시하고 수치·직접 Online 수집·두 테이블·Greedy/DP·
 다중 Seed 비교를 추가한다. 이전 코드 셀 18개와 출력은 보존한다.
+
+## Online n-step SARSA 컴포넌트 조합 검증
+
+현재 소스에는 TDNTargetGenerator, SequenceReplayBuffer, n-step DQN이 없다. 기존 TD0TargetGenerator는
+외부 reward/continuation/terminated의 한 번의 backup을 제공하므로 이를 역순으로 합성해 n-step Return을
+계산한다. 기존 함수의 수식을 복제하거나 TargetGenerator/Learner/Buffer 클래스를 추가하지 않는다.
+`examples/gridworld_n_step_sarsa.py`만 시간 관리와 계산 조합을 담당하며 `modular_rl/`는 변경하지 않는다.
+
+| 예제 API | 계약 |
+|---|---|
+| `learn_n_step_sarsa(model, window, target_generator, update_rule, *, next_action=None)` | 순서 있는 B=1 batch window의 가장 오래된 행 하나 갱신; signed error (1,), table dtype/device, graph 없음 |
+| `run_episode(env, model, target_generator, update_rule, *, n=3, seed=None)` | reset/step, 실제 다음 행동 선택·유지, Online head update, boundary flush; Reward/Step/Update/flags 반환 |
+| `train_and_evaluate(n=3, episodes=1000, seed=7, ...)` | 독립 Gridworld 실행, Q/종료/갱신 수/Greedy/DP/Reward/Length 결과 기록 |
+
+Window는 `deque`의 TransitionBatch snapshots다. 각 필드는 (1,), State/Action은 integer,
+reward는 floating, flags는 bool이며 table dtype/device로 준비하고 인덱스를 long으로 정규화한다.
+Transition.to_batch의 기존 owned·detached 계약으로 배열/Tensor 재사용과 Autograd alias를 피한다.
+연속 관측의 일치와 중간 episode boundary 부재를 검사하되 timestamp를 추론하지 않는다.
+순서와 실제 행동의 기록은 수집자 책임이다. Episode는 전체 완료 기록용으로 유지하고 훈련 전에
+완성 Episode를 수집하지 않는다. ReplayBuffer.sample은 무작위 순서여서 이 Online window에 사용하지 않는다.
+
+### 기존 TargetGenerator의 역순 합성
+
+```text
+no_grad: 마지막 next observation에서 실제 endpoint action의 Q -> continuation (1,)
+         natural terminal이면 Q 평가 없이 zeros_like(reward)
+         reversed(window): continuation = TD0.generate(reward, continuation, terminated)
+TabularQUpdateRule.update(table, oldest_state, oldest_action, continuation)
+```
+
+각 TD0 호출의 shape/dtype/device·termination mask·gradient 계약은 그대로다. 첫 continuation은
+Bootstrap Q이고 이후에는 계산한 suffix Return이다. m번의 기존 backup 합성으로
+`sum(gamma**k * reward[k]) + gamma**m * Q(endpoint, actual_action)`가 된다.
+이름이 TD0라고 해서 TDN API가 구현된 것으로 주장하지 않는다. n과 window/horizon의 책임은 예제에 있다.
+Target/Bootstrap은 각 호출에서 table 갱신 전에 계산하며, 실제 endpoint action을 max나 재샘플링으로 대체하지 않는다.
+
+n=3, gamma=.9, rewards=[1,2,3], endpoint Q=4는 Target=8.146이다. 역순 TD0 호출의
+보상 순서는 [3,2,1]이다. 짧은 T=2 natural terminal은 Targets=[2.8,2], truncated-only는
+[6.04,5.6]이며 실제 보상 수 m=2/1의 discount를 사용한다. terminated와 truncated가 함께 True이면
+natural terminal 규칙이 우선한다. 반환 Error는 `target-current Q`이며 원본 table에 기존 Rule을 적용한다.
+
+### Online 시점과 잔여 갱신
+
+[Sutton & Barto §7.2, p.147](https://www.andrew.cmu.edu/course/10-703/textbook/BartoSutton.pdf#page=169)의
+순서를 따른다. 저장한 A_t를 step에서 실행하고 자연 종료가 아니면 A_(t+1)을 한 번 선택한다.
+그 다음 window 길이가 n이면 tau=t-n+1의 가장 오래된 행을 학습하고 pop한다.
+다음 step은 이미 선택한 행동을 그대로 실행한다. 환경 RNG는 reset(seed), 행동 RNG는
+PyTorch manual_seed(seed)며 Target 계산과 잔여 flush는 RNG를 소비하지 않는다.
+
+n=3, T=5의 업데이트는 (실행 완료 Step 수, tau)=(3,0),(4,1),(5,2),(5,3),(5,4)다.
+마지막 두 갱신은 step/act 없이 수행한다. n>T의 자연 종료는 관측한 보상으로 모든 잔여 head를 갱신한다.
+교재의 종료 후 가상 시간 증가를 실질적 변화가 없는 대기 없이 같은 순서의 flush로 표현한다.
+각 Transition은 정확히 한 번 갱신하며 pending 최대 길이는 n이다. 다음 Episode에 window를 이어 붙이지 않는다.
+
+Truncation은 마지막 관측 S_T의 A_T를 선택만 하고 실행하지 않는다. 각 residual call은 같은 A_T로
+**그 호출 직전의 현재 Q**를 읽는다. 전체 flush에 하나의 Q를 캐시하거나 Target을 한 번에 동결하지 않는다.
+반복 self-transition의 초기 Q=4, rewards=[1,2], gamma=.9, alpha=.5이면 첫 Target=6.04 후 Q=5.02,
+다음 Target=2+.9*5.02=6.518, 최종 Q=5.769다. Bootstrap Q=[4,5.02]를 실제로 읽는지 검사한다.
+자연 종료에서는 모든 residual call에 Bootstrap이 없다. 단일 head당 B=1이므로 기존 Rule의 in-place
+계약을 유지하며 반복 쌍은 각 호출 시점의 current Q를 사용한다. 무리하게 B>1로 일반화하지 않는다.
+
+n=1은 기존 TabularSARSALearner와 같은 forward/gather/TD0/Rule을 사용한다.
+float32/float64, natural terminal/truncation/동시 flag에서 실제 행동·환경 전이·Target·Error·table·Torch RNG를
+정확히 비교했다. Gridworld 세 Seed의 1,000 Episode에서도 Q/Reward/Length가 기존 SARSA와 일치한다.
+길이 <n/=n/>n, n=1/3/5, 반복 state/action, actual next-action 재사용과 누락 없는 갱신을 검증한다.
+
+### Gridworld 동일 예산 결과
+
+각 1,000 Episode, gamma=.9, alpha=.8, epsilon=.1, Seed7/11/19, 학습 cap=2,000, Greedy cap=20이다.
+각 n은 독립 환경·Model을 사용하며 같은 Seed도 동일 경험을 뜻하지 않는다.
+기존 SARSA/Q-learning comparator는 수정하지 않는다. Notebook은 기존 결과를 재사용한다.
+
+| Seed | n=1 Step / Greedy / RMSE | n=3 Step / Greedy / RMSE | n=5 Step / Greedy / RMSE | Q-learning Step / Greedy / RMSE |
+|---|---|---|---|---|
+| 7 | 8,604 / Goal 5 / .375808 | 7,137 / Goal 5 / .274961 | 9,920 / Goal 5 / .250066 | 5,738 / Goal 5 / .230544 |
+| 11 | 6,659 / Goal 5 / .300900 | 6,818 / Goal 5 / .372150 | 7,308 / Goal 5 / .298566 | 5,630 / Goal 5 / .069670 |
+| 19 | 6,627 / cutoff 20 / .255833 | 7,089 / Goal 5 / .204578 | 8,134 / Goal 5 / .246335 | 5,611 / Goal 5 / .243963 |
+
+모든 수집 Step에 대해 업데이트 수가 일치한다. 각 n의 자연 종료 Episode는 1,000, 학습 Truncation은 0이었다.
+DP 최적 경로는 5 Step/V*(start)=.6561이며 보상·길이·Q·누적 Step·Greedy/DP 경로를 기록한다.
+RMSE는 비종료 10개 상태의 max Q와 최적 V 차이이며 탐색 정책 Q가 Q*와 같다고 가정하지 않는다.
+고정 alpha의 유한 표본 결과에서 n-step의 우위나 특정 Seed의 성공을 요구하지 않는다.
+
+### Checkpoint와 구조적 평가
+
+Episode 경계에는 Model.state_dict(epsilon 포함), n/gamma/alpha, 환경·Torch CPU/CUDA RNG를 저장한다.
+도중에는 owned pending batches, 현재 관측, 이미 선택한 action/log_prob, Episode 누적 통계,
+환경 위치/RNG와 TimeLimit 잔여 예산도 필요하다. 고정 경험 stream 도중의 pending/Model/행동/RNG를
+복원한 뒤 후속 Error/Q가 정확히 같은지 테스트한다. 현재 환경에는 범용 mid-episode checkpoint API가 없다.
+예제는 그런 상태를 Model이나 Learner에 숨기지 않고 수집자 소유권을 명시한다.
+
+재사용 컴포넌트는 Model/InputAdapter/Representation/TabularQEstimator/Selector, Transition/Batch,
+TD0TargetGenerator와 TabularQUpdateRule이다. 추가된 것은 ordered window 관리와 delayed update/flush의
+조합 함수다. TDN/SequenceReplay/n-step DQN이 없다는 사실을 소스와 문서에서 확인했으며 새로 만들지 않는다.
+기존 Learner는 독립 Batch를 즉시 학습하고 temporal window·actual endpoint action·flush 상태를 소유하지 않는다.
+이 한계를 예제 수준의 명시적 deque/함수로 해결할 수 있었으며 핵심 컴포넌트 변경은 필요 없었다.
+
+최소 공통화 후보는 ordered B=1 window, 실제 horizon, endpoint bootstrap value와 boundary를 외부에서
+전달하는 작은 함수다. reward backup과 update 시점 관리는 n-step Q-learning/Expected SARSA에 재사용할 수 있지만
+끝점 값 선택은 max/Policy 기대값/실제 행동으로 다르다. Q(sigma)는 중간 분기·확률·sigma 혼합이 필요하므로
+endpoint 교체만으로 구현된다고 보지 않는다. 이번에는 공통 인터페이스나 BaseLearner/Buffer를 추가하지 않는다.
+06 Notebook §14는 같은 예제 함수와 기존 comparator를 사용하고 이전 49개 셀 전체를 그대로 보존한다.
 
 ## DQNLearner와 CartPole 검증
 
@@ -1753,10 +1855,10 @@ seed7, 1,000 Episode·5,701 Step 이후 Greedy는 5 Step·보상 +1이었다. Q/
 두 실행에서 일치했고 기존 05의 코드 셀 21개 소스·출력은 이전 commit과 일치했다.
 SARSA는 γ=.9, α=.8, ε=.1, Seed7의 1,000 Episode/8,604 Step 이후 Greedy 5 Step/+1을 보였다.
 직접 Next Action을 재사용하는 루프와 다중 Seed 비교 루프의 Q가 일치하며 비교 결과는 위에 기록한다.
-Greedy 정책·학습 Reward/Length/Step 그림 2개를 추가했다. Expected SARSA §12와 Double Q-learning §13은
-예제 함수 조합으로 검증하며 그림 2개씩 추가해 총 26개 PNG와 텍스트·수치가 두 Run All에서 일치했다.
-기존 06의 코드 셀 18개 소스·출력·실행 번호·메타데이터도 이전 commit과 일치했다.
-최종 전체 pytest는 1,409 passed, 35 skipped(CUDA 미지원)였으며 본체 추적 파일 61개는 변경하지 않았다.
+Greedy 정책·학습 Reward/Length/Step 그림 2개를 추가했다. Expected SARSA §12, Double Q-learning §13,
+Online n-step SARSA §14는 예제 함수 조합으로 검증하며 그림 2개씩 추가해 총 28개 PNG와 텍스트·수치가
+두 Run All에서 일치했다. 기존 06의 49개 셀 전체(코드 23개)의 소스·출력·실행 번호·메타데이터도 이전 commit과 같다.
+최종 전체 pytest는 1,479 passed, 37 skipped(CUDA 미지원)였으며 본체 추적 파일 61개는 변경하지 않았다.
 
 ## 향후 Learner 구현 전에 남은 결정 사항
 

@@ -90,6 +90,7 @@ Episode를 학습하지 않고 비교를 중단한다. TD/Q는 terminated에서�
 | ch06/q_learning_simple.py: 간소화 QLearningAgent | 06 §8–10 | 같은 Model/Learner | 실행 완료·통합 | 중복 루프 없이 두 예제의 공통 갱신 사용; stochastic 동률은 균등, deterministic은 최소 인덱스 |
 | Expected SARSA 조합 검증 확장 | 06 §12 | Model.forward, 동일 ActionSelector.probabilities, TD0TargetGenerator, TabularQUpdateRule | 실행 완료·예제 함수 | 새로운 Learner 없이 ΣπQ; 기존 코드 셀·출력 유지, 본체 API 변경 없음 |
 | Double Q-learning 조합 검증 확장 | 06 §13 | 두 Model.forward, EstimatorOutput, 기존 Selector.select, TD0TargetGenerator, TabularQUpdateRule | 실행 완료·예제 함수 | 독립 table·Q 합 Behavior·교차 Bootstrap; 원본 Gaussian Bias 실험은 현재 환경 계약으로 정확히 표현 불가 |
+| Online n-step SARSA 확장 | 06 §14 | Model.act/forward, Transition.to_batch, TD0TargetGenerator 역순 합성, TabularQUpdateRule | 실행 완료·예제 함수 | deque의 B=1 시간순 window; actual action 유지·boundary flush, TDN/SequenceReplay는 현재 없음 |
 | common/gridworld.py: GridWorld | 세 Notebook 환경 구성 | dlfs4_gridworld, make_dlfs4_gridworld_env, TabularEnv, DLFS4_STATES/START_STATE | 실행 완료 | DP의 알려진 kernel과 Gymnasium 실행 환경 분리; compact State ID |
 | common/gridworld_render.py: Renderer | 세 Notebook 결과 표시 | plot_grid, Matplotlib | 실행 완료·간소화 | Q 삼각형 대신 행동별 heatmap; 목표 V=0과 진입 +1 구분 |
 | common/utils.py: argmax/greedy_probs/plot_total_reward | 06 §8–10 | ActionSelector.select/probabilities, plt.plot | 실행 완료·대체 | 원본 무작위 단일 argmax와 달리 동률 집합의 정확한 확률 사용 |
@@ -138,6 +139,7 @@ python -m examples.gridworld_off_policy_mc_control --episodes 1000 --seeds 7 11 
 python -m examples.gridworld_sarsa --episodes 1000 --seeds 7 11 19 --alpha .8 --epsilon .1
 python -m examples.gridworld_expected_sarsa --episodes 1000 --seeds 7 11 19 --alpha .8 --epsilon .1
 python -m examples.gridworld_double_q_learning --episodes 1000 --seeds 7 11 19 --compare-all
+python -m examples.gridworld_n_step_sarsa --episodes 1000 --seeds 7 11 19 --ns 1 3 5
 ```
 
 SARSA는 설치된 ModularRL의 공개 API만 사용하며 환경 루프를 Notebook에서 직접 보여준다.
@@ -157,6 +159,12 @@ Double Q §13는 두 독립 TabularQEstimator Model을 사용하고 합산 Q를 
 환경 reset/step·Behavior·갱신 동전의 RNG를 분리하고 Q-learning/SARSA/Expected 결과는 §12에서 재사용한다.
 DP와의 가치 비교에는 max((Q1+Q2)/2)를 쓰고 행동에는 Q1+Q2를 쓴다.
 교재 Gaussian 보상과 상태별 행동 수는 현재 TabularMDP로 정확히 표현할 수 없어 Bias 실험은 제외한다.
+
+n-step SARSA §14는 현재 존재하는 TD0TargetGenerator를 역순 합성한다. TDNTargetGenerator,
+SequenceReplayBuffer, n-step DQN은 현재 저장소에 없다. deque는 owned B=1 snapshots를 시간순 보관하며
+n개 보상이 모이는 즉시 가장 오래된 행을 학습하고 boundary에서 추가 step/act 없이 잔여 head를 모두 처리한다.
+실제 다음 행동은 학습 전에 선택해 다음 step까지 유지한다. Truncation은 마지막 선택 행동으로 실제
+남은 보상 수의 discount를 적용하고, 각 residual call의 현재 Q를 읽는다. 기존 49개 셀은 모두 그대로 보존한다.
 
 `tests/test_dlfs4_notebooks.py`는 nbformat 검증 후 각 Notebook을 같은 Kernel에서 두 번
 실행하고 텍스트·숫자·PNG 출력이 같은지 확인한다. 별도의 작은 테스트 kernelspec으로 현재
@@ -187,6 +195,7 @@ python -m pytest -q tests/test_dlfs4_notebooks.py
 | SARSA/Q-learning 비교 | 같은 설정·독립 실행, Seed7/11/19 | SARSA Step=8,604/6,659/6,627, Greedy=5/5/20(cutoff); Q-learning Step=5,738/5,630/5,611, Greedy=5/5/5 |
 | Expected SARSA 조합 | γ=.9, α=.8, ε=.1, 1,000 Episode, Seed7/11/19 | Step=53,664/5,592/5,621; Greedy 모두 Goal 5 Step/+1; max Q의 DP RMSE=.260824/.050405/.305310 |
 | Double Q-learning 조합 | 동일 설정, 1,000 Episode, Seed7/11/19 | Step=6,017/5,790/5,796; Greedy 모두 Goal 5 Step/+1; max 평균 Q의 DP RMSE=2.449e-9/.148032/1.394e-8 |
+| Online n-step SARSA | 동일 설정·각 1,000 Episode, Seed7/11/19 | n=1 Step=8,604/6,659/6,627; n=3=7,137/6,818/7,089; n=5=9,920/7,308/8,134; Update=Step; n=3/5 Greedy 모두 Goal 5 |
 
 이 수치는 해당 설정의 관측 결과다. 방문이 적은 상태·행동의 Q는 초기값으로 남을 수 있으며
 시작 경로의 성공을 모든 Q의 수렴으로 해석하지 않는다. Gymnasium 경로는 기존 Sampler의
@@ -201,8 +210,8 @@ Control 단일 표본 reward=4/b=.25는 Q=4/C=1, 두 단계 rewards=[1,3]은 Q=[
 SARSA 수치 예제의 a′=1은 Error=-1.2/Q=3.4, a′=0은 Error=6/Q=7, terminal은 Error=-3/Q=2.5다.
 직접 루프와 비교 루프의 Seed7 Q는 일치한다. 종료·Truncation·선택 횟수/실행 재사용·Batch/Online
 차이·dtype/device·Model 복원을 결정적으로 검증한다. Seed19의 Greedy cutoff도 그대로 보고한다.
-전체 pytest는 1,409 passed, 35 skipped(CUDA 미지원)다. 세 Notebook Run All 두 번의
-텍스트·수치·26개 PNG는 일치했고 기존 06 Notebook 코드 셀 18개의 소스·출력은 이전 commit과 같다.
+전체 pytest는 1,479 passed, 37 skipped(CUDA 미지원)다. 세 Notebook Run All 두 번의
+텍스트·수치·28개 PNG는 일치했고 기존 06 Notebook의 49개 셀 전체(코드 23개)는 이전 commit과 같다.
 quickstart·DP/MC/TD/On/Off-policy MC·FrozenLake·CartPole Smoke Test도 통과했다.
 
 Expected SARSA 추가 실험은 학습 중 Reward/Length와 누적 Step을 기록한다. Seed7의 학습 cutoff 23회와
@@ -216,6 +225,13 @@ Q1/Q2 동전은 Seed7/11/19에서 3,044·2,973 / 2,872·2,918 / 2,868·2,928회�
 초기 Greedy는 20 Step cutoff, 학습 후 DP와 같은 5 Step이고 training cutoff는 모두 0이었다.
 합산 정책 확률·실제 Sampling·Storage 독립성·Frozen Target·중복 순서·Checkpoint를 결정적으로 검증한다.
 원본 Bias 분포와 표현 한계 및 향후 결합 함수 후보는 [ARCHITECTURE.md](../../docs/ARCHITECTURE.md#double-q-learning-컴포넌트-조합-검증)에 기록한다.
+
+n=1은 기존 SARSA와 세 Seed의 Q/Reward/Length가 정확히 같고 Seed19의 Greedy cutoff도 유지한다.
+n=3의 수치 Target은 8.146, 짧은 terminal의 Targets=[2.8,2], truncated-only는 [6.04,5.6]이다.
+반복 self-transition의 잔여 Bootstrap은 Q=4에서 첫 update 후 5.02를 다시 읽으며 Target=6.518이 된다.
+n=3, T=5는 3번째 환경 Step부터 갱신하고 마지막 두 행을 종료 후 처리한다. 모든 Transition을 한 번씩 갱신한다.
+관련 책임·checkpoint pending/선택 행동·향후 endpoint 조합 후보는
+[ARCHITECTURE.md](../../docs/ARCHITECTURE.md#online-n-step-sarsa-컴포넌트-조합-검증)에 기록한다.
 
 ## 최소 확장 제안
 

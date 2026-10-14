@@ -845,6 +845,55 @@ and different valid action counts per state, which the current TabularMDP does
 not represent. Its exact experiment is excluded; see the source and scope
 analysis in [ARCHITECTURE.md](docs/ARCHITECTURE.md#double-q-learning-컴포넌트-조합-검증).
 
+## Online n-step SARSA component composition
+
+`examples/gridworld_n_step_sarsa.py` uses an ordered deque of owned B=1
+`Transition.to_batch()` snapshots. It starts learning as soon as n rewards are
+available, carries the actual next action selected before each update, and
+flushes every remaining head at an episode boundary without extra environment
+steps or action samples. There is no new Learner or library implementation change.
+
+```python
+from examples.gridworld_n_step_sarsa import learn_n_step_sarsa, run_episode
+
+error = learn_n_step_sarsa(model, pending, target_generator, update_rule,
+                          next_action=already_selected_action)
+result = run_episode(env, model, target_generator, update_rule, n=3, seed=7)
+```
+
+The repository has no TDNTargetGenerator, SequenceReplayBuffer or n-step DQN.
+The example composes the existing TD0TargetGenerator backward through rewards:
+the final continuation is Q at the actual selected endpoint action, and each
+call applies the existing `reward + gamma * continuation` calculation. Only the
+oldest row is updated with the existing TabularQUpdateRule. The caller removes
+that head after success; the learning function does not mutate the window.
+
+Natural termination removes bootstrap, even when truncation is also true.
+Time-limit tails use the actual number of rewards m and thus gamma**m. Each
+tail call reads current Q immediately before updating, preserving the final
+selected action. For example, rewards [1,2,3], gamma=.9 and endpoint Q=4 give
+8.146. A two-reward terminal tail gives [2.8,2]; a truncated tail gives [6.04,5.6].
+n=1 matches the existing SARSA action/RNG timing and target/update arithmetic.
+
+```bash
+python -m examples.gridworld_n_step_sarsa --episodes 1000 --seeds 7 11 19 --ns 1 3 5
+python -m pytest -q tests/test_n_step_sarsa_composition.py tests/test_gridworld_n_step_sarsa.py
+```
+
+For gamma=.9, alpha=.8, epsilon=.1 and 1,000 episodes, n=1/3/5 used
+8,604/7,137/9,920 steps at seed 7; 6,659/6,818/7,308 at seed 11; and
+6,627/7,089/8,134 at seed 19. Every transition was updated exactly once.
+n=3 and n=5 reached the goal in 5 greedy steps for these seeds. The existing
+n=1 seed-19 greedy cutoff is preserved. Tests do not require a performance ranking.
+
+Notebook 06 §14 reuses the same example functions and earlier comparator results,
+preserving all existing cells/outputs. Checkpoints require Model/epsilon, n,
+gamma/alpha and RNG; mid-episode continuation also requires pending snapshots,
+the already selected action, observation and collector/environment state.
+Current Learners do not own this temporal state, and random ReplayBuffer samples
+do not guarantee its order. The contracts and remaining generalization questions
+are recorded in [ARCHITECTURE.md](docs/ARCHITECTURE.md#online-n-step-sarsa-컴포넌트-조합-검증).
+
 ## Examples
 
 ```python
