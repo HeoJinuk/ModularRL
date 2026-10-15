@@ -65,6 +65,22 @@ class DQNLearner:
             next_value = next_q.max(dim=-1).values
             target = self.target_generator.generate(batch.reward, next_value, batch.terminated)
 
+        return self.optimize(prediction, target)
+
+    def optimize(self, prediction: Tensor, target: Tensor) -> TDLossOutput:
+        """Apply one semi-gradient update to externally prepared Q predictions.
+
+        prediction and target are nonempty floating Tensors (B,) on the Online
+        Model's dtype/device. The caller builds prediction from that model with
+        gradients enabled and supplies a fixed target without a graph. Target
+        gradients are rejected, never silently detached; graph provenance is
+        the caller's responsibility. The existing UpdateRule checks matching
+        shape/dtype/device before any optimizer call.
+
+        No model evaluation, target generation/sync, sampling or action selection
+        occurs here. Return detached pre-update signed errors and scalar loss.
+        """
+        self._validate_optimization(prediction, target)
         result = self.update_rule.compute(prediction, target)
         self.optimizer.zero_grad()
         result.loss.backward()
@@ -122,6 +138,20 @@ class DQNLearner:
         parameters = [p for group in self.optimizer.param_groups for p in group["params"]]
         if not parameters or any(id(p) not in online_ids for p in parameters):
             raise ValueError("Optimizer must contain only Online Model parameters, never Target parameters")
+
+    def _validate_optimization(self, prediction: Tensor, target: Tensor) -> None:
+        """Check DQN-specific batch, gradient and Online Model contracts."""
+        if not isinstance(prediction, Tensor) or not isinstance(target, Tensor):
+            raise TypeError("prediction and target must be Tensors")
+        if prediction.ndim != 1:
+            raise ValueError("DQN prediction must have shape (B,)")
+        if target.requires_grad:
+            raise ValueError("DQN target must be fixed; compute it under no_grad or detach it explicitly")
+        if not prediction.requires_grad:
+            raise ValueError("DQN prediction must retain its gradient path")
+        reference = next(self.online_model.parameters())
+        if prediction.dtype != reference.dtype or prediction.device != reference.device:
+            raise ValueError("DQN prediction must match Online Model dtype and device")
 
     @staticmethod
     def _validate(batch: TransitionBatch) -> None:

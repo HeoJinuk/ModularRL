@@ -1138,6 +1138,7 @@ ActionSelector는 학습에서 사용하지 않는다. 수집·샘플링·평가
 |---|---|
 | `DQNLearner(online_model, target_model, optimizer, target_generator, update_rule)` | 독립된 동일 구조 Model, Online 전용 Optimizer, 기존 Target/UpdateRule |
 | `learn(batch: TransitionBatch) -> TDLossOutput` | 한 번의 backward/step, 반환값은 detach된 업데이트 직전 통계 |
+| `optimize(prediction: Tensor, target: Tensor) -> TDLossOutput` | 외부 Online prediction과 고정 target으로 같은 Loss/Optimizer 절차 실행 |
 | `sync_target() -> None` | 명시적인 hard copy; 초기 복사와 이후 주기는 호출자가 결정 |
 | observation / next_observation | 동일 shape `(B, *observation_shape)`; Model의 Representation 입력 계약 준수 |
 | action / reward / terminated / truncated | `(B,)`; 정수 index / floating / bool / bool |
@@ -1157,7 +1158,7 @@ Learner: Batch를 Online device/dtype으로 준비, action long 변환
          -> Online Model.forward(observation) -> gather Q(s,a)
          -> no_grad: Target.eval -> forward(next_observation) -> max Q(s',·)
          -> no_grad: TD0TargetGenerator.generate(reward, next_value, terminated)
-         -> TDLossUpdateRule.compute(prediction, target)
+         -> optimize(prediction, target): TDLossUpdateRule.compute
          -> optimizer.zero_grad -> loss.backward -> optimizer.step
          -> TDLossOutput(td_error.detach(), loss.detach())
 호출자: 지정 시점에 learner.sync_target()
@@ -1170,6 +1171,27 @@ DQNLearner가 no_grad로 Target 평가·계산을 감싸고 반환 통계만 det
 Representation과 Estimator에는 gradient가 전달되고 Target에는 전달되지 않는다.
 truncated=True, terminated=False인 Time-limit에서도 Bootstrap한다. 실제 final observation과
 다음 에피소드 reset 구분은 호출자가 관리하며, Learner는 이를 추론하지 않는다.
+
+### 공유 최적화 경계와 Semi-gradient
+
+`DQNLearner.optimize(prediction, target)`는 기본 DQN과 외부 n-step Target 조합이 같은
+Loss/Optimizer/반환 절차를 사용하도록 한다. 두 Tensor는 비어 있지 않은 `(B,)`이며 동일한
+floating dtype·device를 사용한다. Prediction은 Online Model의 dtype/device와 gradient 경로를
+유지해야 한다. 호출자가 해당 Online Model에서 만들었는지 확인하는 graph 탐색은 하지 않는다.
+
+Target은 호출자가 no_grad에서 계산한 고정 Tensor다. `target.requires_grad=True`는 Optimizer 호출
+전에 명확하게 거절하며 조용히 detach하지 않는다. Shape/dtype/device 일치 등 공통 검증은 기존
+TDLossUpdateRule이 수행한다. 모든 검증은 zero_grad/backward/step 전에 끝난다.
+TargetGenerator와 TDLossUpdateRule의 gradient 보존 계약은 유지한다. Target 미분을 연구하는
+호출자는 기존 Rule과 명시적인 별도 Optimizer 절차를 사용할 수 있다.
+
+optimize는 Model Forward, Target Forward/생성/Sync, Replay sampling, 환경 상호작용과 ε 변경을
+수행하지 않는다. `compute -> zero_grad -> backward -> step` 뒤 signed TD error와 scalar loss를
+detach하여 반환한다. 결과는 업데이트 직전 값이며 Prediction을 미리 detach하지 않는다.
+
+기존 learn(batch)는 Online Forward/gather, no_grad Target eval/Forward, TD0 Target 계산을
+현재 순서대로 수행한 뒤 optimize에 위임한다. 생성자·learn·sync_target의 시그니처와 반환 계약은
+그대로다. Optimizer는 같은 인스턴스를 계속 사용하고 Target 복사는 명시적 sync에서만 수행한다.
 
 ### Target Model과 Optimizer 소유권
 
@@ -2849,6 +2871,9 @@ result = TDLoss.compute(prediction, target)       # SmoothL1 unreduced -> mean
 optimizer.zero_grad(); result.loss.backward(); optimizer.step()
 ```
 
+위 Loss/Optimizer 세부 절차는 이제 `learner.optimize(prediction, target)` 한 곳에 있다.
+일반 1-step learn과 예제의 real n-step 함수가 이 경계를 공유한다.
+
 DQNLearner와 TDLoss의 기존 Gradient 계약을 유지한다. 반환 TD Error/Loss는 업데이트 직전 계산값을
 detach한 Tensor다. Target은 독립 저장 공간·동결·eval이며 Optimizer에 포함하지 않는다.
 Target 파라미터가 변하는 시점은 초기 복사와 명시적인 hard sync뿐이다. 온라인 train/eval은 호출자가 관리한다.
@@ -2896,9 +2921,10 @@ target = TD0.generate(reward_sum, continuation, terminated)
 TD0가 한 gamma를 곱하므로 continuation에 gamma^(m-1)을 적용하면 요구한 gamma^m이 된다.
 gamma=0,m=1도 지원한다. 자연 종료는 Bootstrap을 제거하고 Time-limit은 실제 마지막 관측으로 Bootstrap한다.
 
-기존 DQNLearner.learn이 외부 prediction/target이나 Horizon을 받지 않아 n-step 경로는 해당 learn을 그대로
-호출할 수 없다. 작은 `learn_real_n_step`에서 같은 공개 Model/TargetGenerator/UpdateRule/Optimizer를 직접
-사용한다. gather·no_grad Target 조회·zero_grad/backward/step 약 10줄이 기존 DQN과 반복된다.
+DQNLearner.learn은 계속 1-step TransitionBatch를 받는다. 작은 `learn_real_n_step`은 기존처럼
+같은 Online prediction/gather와 no_grad Target 조회·실제 m의 Target 계산을 직접 수행한 뒤,
+`learner.optimize(prediction, target)`를 호출한다. 기존에 반복하던 Rule.compute, zero_grad,
+backward, step, detached TDLossOutput 반환의 다섯 문장을 공유하며 Horizon 수식은 숨기지 않는다.
 Private 메서드나 Optimizer 내부 상태 조작으로 우회하지 않는다. n=1 Metadata 경로와 기존 learn의
 파라미터·Adam 상태·결과가 정확히 일치함을 테스트한다. 일반 1-step Real과 모든 Planning은 기존 learn 그대로다.
 
@@ -2958,11 +2984,13 @@ Buffer private RNG/저장소를 직접 읽거나 수정하지 않으며 새 프�
 | 19. All-action? | World에 predict(state, action)/enumerate actions 등 명시적 질의와 미관측 Pair 처리 규칙이 필요하다. 현재 sample-only 결과만 있다. |
 | 20. 불확실성 기반 Q(σ)? | 모델 version/fidelity·uncertainty와 수집 시 σ·π/b·행동/경로·Horizon·경계·snapshot 의미가 필요하다. 단일 1-step Batch만으로 완성되지 않는다. |
 
-최소 공통화 후보는 외부 Target/Horizon으로 prediction→loss→optimizer 경로를 재사용하는 좁은 진입점,
-raw 경험과 Metadata의 안정적 저장·샘플 ID·공개 checkpoint 계약, 명시적인 source별 sampling/scheduling이다.
-예를 들어 Learner의 `optimize(prediction, target) -> TDLossOutput` 같은 공개 메서드 후보는
-Optimizer 소유권을 유지하면서 현재 반복되는 Loss/zero_grad/backward/step만 공유할 수 있다.
-Model 평가·Horizon·no_grad Target 정책은 호출자에 남긴다. 이는 향후 검토 후보이며 이번에 추가하지 않았다.
+최소 공통화의 첫 단계로 `DQNLearner.optimize(prediction, target) -> TDLossOutput`를 추가했다.
+Optimizer 소유권을 유지하면서 반복되던 Loss/zero_grad/backward/step/반환을 공유한다.
+Model 평가·Horizon·no_grad Target 정책은 호출자에 남긴다. Real과 Planning은 같은 Optimizer moment와
+같은 Target Network를 계속 사용하며 raw/Metadata Replay, sample RNG, readiness, 경계 Flush와
+실제 환경 Step 기준 Sync 일정은 변경하지 않았다. World Model·Planning·Runner API도 확장하지 않았다.
+raw 경험과 Metadata의 안정적 저장·샘플 ID·공개 checkpoint, 예제 private/runpy 의존과
+명시적인 source별 sampling/scheduling은 남은 후속 과제다.
 현재 검증만으로 거대한 BaseLearner나 모든 알고리즘 Bootstrap 추상화를 추가할 근거는 없다.
 학습 기반 WorldModel, 불확실성/우선순위/All-action Planning과 Q(σ)-Planning은 향후 연구 범위다.
 
@@ -3034,3 +3062,35 @@ PNG는 총 40개(4/11/19/3/3개)다. 새 08은 23개 셀/코드 12개/PNG 3개�
 기존 04–07 네 Notebook은 셀·출력·metadata를 포함한 전체 byte hash가 같고,
 Tabular Dyna-Q·SARSA·n-step SARSA·CartPole 보호 대상 예제도 그대로다.
 모든 구현 변경은 새 예제에 한정하며 기존 공개 API나 프레임워크 추상 계층은 바꾸지 않았다.
+
+## Phase 1: DQN 공유 최적화 경계 검증
+
+위 Dyna-DQN 검증 기록 이후 `DQNLearner.optimize(prediction, target)`를 추가하고 기본 learn과
+real n-step 함수의 동일한 Loss/Optimizer/반환 다섯 문장을 공유했다. 기존 1-step/다단계 Target 계산,
+데이터·Replay·World Model·Planning·Runner 계약과 기존 공개 시그니처는 유지했다.
+
+신규 `tests/test_dqn_optimization.py`는 45 passed/24 skipped(CUDA 미지원)다.
+B=1/4/32, float32/64, gradient와 detached 반환, Parameter storage 유지, Target 불변,
+추가 Forward/Sync/RNG 소비 부재 및 잘못된 입력에서 기존 Parameter/Gradient/Adam 상태 보존을 확인한다.
+독립적으로 복제한 초기 상태에서 기준 Commit의 Optimizer 절차와 현재 learn/optimize를 비교하며,
+Adam/SGD Momentum·Dropout RNG·BatchNorm buffer까지 bit-exact인지 검증한다.
+기존 DQN/Dyna-DQN 세 테스트 파일도 변경 없이 140 passed/45 skipped로 통과했다.
+
+별도의 전체 루프 참조 실험은 real n=1/3/5 × float32/64 × Adam/SGD Momentum의 12개 설정을
+비교했다. 80 실제 Step마다 Real 74회·Planning 80회·Target Sync 11회를 수행하며 모든 trace,
+반환 통계·Online/Target·Optimizer 상태·Flush metadata·후속 Replay 표본·행동/환경/Planning/n-step RNG가
+기존 최적화 절차와 정확히 일치했다. 이는 이 리팩터링의 동등성 검증이며 새 알고리즘 성능 실험이 아니다.
+quickstart, FrozenLake, CartPole와 기존/신규 Gridworld를 포함한 18개 CLI Smoke Test도 통과했다.
+
+이번 Phase 1의 전체 `python -m pytest -q`는 **2,019 passed / 135 skipped(CUDA 미지원)**로
+통과했다. 실행 시간은 2,840.62초(47분 20초)다. 기준 기록 1,974/111을 재인용한 결과가 아니라
+이번 소스와 신규 테스트를 포함해 실제 실행한 결과다.
+
+04–08 다섯 Notebook을 각각 같은 Kernel에서 Run All 두 번 실행했으며 text/numeric/PNG가
+두 실행 사이에 일치했다. 실행 결과를 기존 저장본과도 대조하여 PNG 40개(4/11/19/3/3개)를 포함한
+출력이 같고 Cell source/ID/metadata와 Notebook metadata도 유지되는지 확인했다.
+다섯 원본 Notebook 파일은 byte hash도 동일하다.
+
+원본 핵심 Python 61개 중 dqn.py만, 예제 18개 중 gridworld_dyna_dqn.py만 변경했다.
+기존 테스트 52개 파일은 그대로이며 신규 최적화 테스트만 추가했다. 두 학습 함수의 public signature와
+최적화 이전 계산은 AST 비교에서도 동일하다. 후속 Window/Replay/World Model/Runner 리팩터링은 수행하지 않았다.

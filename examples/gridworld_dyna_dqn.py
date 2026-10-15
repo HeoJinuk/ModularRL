@@ -127,9 +127,8 @@ def learn_real_n_step(learner, experiences):
     DQNLearner.learn fixes one-step bootstrap and accepts no external target.
     This small example function reuses its SAME online/target/optimizer and
     public TargetGenerator/UpdateRule; it calls no private learner method.
-    Prediction retains gradients, target uses no_grad/current target eval,
-    and returned metrics are detached exactly as in the existing learner.
-    The one repeated optimizer sequence is necessary under that public API.
+    Prediction retains gradients and target uses no_grad/current target eval.
+    DQNLearner.optimize owns the shared loss/optimizer step and detached metrics.
     """
     _validate_experiences(experiences, learner.target_generator.gamma)
     reference = next(learner.online_model.parameters())
@@ -148,11 +147,7 @@ def learn_real_n_step(learner, experiences):
         # TD0 contributes one gamma; scale its continuation by gamma**(m-1).
         continuation = learner.target_generator.gamma ** (horizons - 1) * next_value
         target = learner.target_generator.generate(rewards, continuation, terminated)
-    result = learner.update_rule.compute(prediction, target)
-    learner.optimizer.zero_grad()
-    result.loss.backward()
-    learner.optimizer.step()
-    return TDLossOutput(result.td_error.detach(), result.loss.detach())
+    return learner.optimize(prediction, target)
 
 
 def run_steps(env, learner, replay, *, steps, world_model=None, planning_steps=0,
