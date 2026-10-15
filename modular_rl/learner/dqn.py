@@ -4,9 +4,9 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
-from modular_rl.component.target_generator import TD0TargetGenerator
+from modular_rl.component.target_generator import NStepTargetGenerator, TD0TargetGenerator
 from modular_rl.component.update_rule import TDLossUpdateRule
-from modular_rl.data import EstimatorOutput, TDLossOutput, TransitionBatch
+from modular_rl.data import EstimatorOutput, SequenceBatch, TDLossOutput, TransitionBatch
 from modular_rl.model import Model
 
 
@@ -27,6 +27,12 @@ class DQNLearner:
     errors (B,) and a scalar loss. Time-limit truncation retains bootstrap;
     the caller supplies the actual final observation, not an autoreset one.
     Online train/eval mode remains the caller's choice.
+
+    SequenceBatch rows additionally support reward-only n-step DQN. Their valid
+    prefix supplies the actual horizon and last next observation; the current
+    Target Model evaluates that endpoint. n_step_target_generator is optional
+    and defaults to the one-step generator's gamma. Configure matching gammas
+    before construction; online on-policy multi-step algorithms are separate.
     """
 
     def __init__(
@@ -36,19 +42,30 @@ class DQNLearner:
         optimizer: Optimizer,
         target_generator: TD0TargetGenerator,
         update_rule: TDLossUpdateRule,
+        *,
+        n_step_target_generator: NStepTargetGenerator | None = None,
     ) -> None:
         self.online_model = online_model
         self.target_model = target_model
         self.optimizer = optimizer
         self.target_generator = target_generator
         self.update_rule = update_rule
+        self.n_step_target_generator = (
+            n_step_target_generator if n_step_target_generator is not None
+            else NStepTargetGenerator(target_generator.gamma)
+        )
+        if self.n_step_target_generator.gamma != target_generator.gamma:
+            raise ValueError("One-step and n-step target generators must use the same gamma")
         self._validate_models()
         self._validate_optimizer()
         self.target_model.requires_grad_(False)
         self.target_model.zero_grad(set_to_none=True)
         self.target_model.eval()
 
-    def learn(self, batch: TransitionBatch) -> TDLossOutput:
+    def learn(self, batch: TransitionBatch | SequenceBatch) -> TDLossOutput:
+        """Update from unordered one-step samples or ordered n-step replay rows."""
+        if isinstance(batch, SequenceBatch):
+            return self._learn_sequence(batch)
         self._validate(batch)
         reference = next(self.online_model.parameters())
         batch = batch.to(reference.device, dtype=reference.dtype)
@@ -64,6 +81,27 @@ class DQNLearner:
                                    n_actions=q.shape[-1])
             next_value = next_q.max(dim=-1).values
             target = self.target_generator.generate(batch.reward, next_value, batch.terminated)
+
+        return self.optimize(prediction, target)
+
+    def _learn_sequence(self, batch: SequenceBatch) -> TDLossOutput:
+        self._validate_sequence(batch)
+        reference = next(self.online_model.parameters())
+        batch = batch.to(reference.device, dtype=reference.dtype)
+        actions = batch.action[:, 0].long()
+        batch_size = actions.numel()
+
+        q = self._q_values(self.online_model(batch.observation[:, 0]), batch_size, reference)
+        self._validate_actions(actions, q.shape[-1])
+        prediction = q.gather(-1, actions.unsqueeze(-1)).squeeze(-1)
+        rows = torch.arange(batch_size, device=reference.device)
+        last_observation = batch.next_observation[rows, batch.horizon - 1]
+        with torch.no_grad():
+            self.target_model.eval()
+            next_q = self._q_values(self.target_model(last_observation), batch_size, reference,
+                                   n_actions=q.shape[-1])
+            next_value = next_q.max(dim=-1).values
+            target = self.n_step_target_generator.generate(batch.reward, next_value, batch.terminated, batch.valid)
 
         return self.optimize(prediction, target)
 
@@ -152,6 +190,41 @@ class DQNLearner:
         reference = next(self.online_model.parameters())
         if prediction.dtype != reference.dtype or prediction.device != reference.device:
             raise ValueError("DQN prediction must match Online Model dtype and device")
+
+    @staticmethod
+    def _validate_sequence(batch: SequenceBatch) -> None:
+        """Check ordered replay dimensions and boundaries before model evaluation."""
+        for name in ("observation", "next_observation", "action", "reward", "terminated", "truncated", "valid", "horizon"):
+            if not isinstance(getattr(batch, name), Tensor):
+                raise TypeError(f"{name} must be a Tensor")
+        if batch.reward.ndim != 2 or 0 in batch.reward.shape:
+            raise ValueError("Sequence rewards must be nonempty (B, T)")
+        shape = batch.reward.shape
+        if batch.observation.shape[:2] != shape or batch.next_observation.shape != batch.observation.shape:
+            raise ValueError("Sequence observations must have matching (B, T, ...) shapes")
+        if any(getattr(batch, name).shape != shape for name in ("action", "terminated", "truncated", "valid")):
+            raise ValueError("Sequence actions, rewards and masks must have shape (B, T)")
+        if batch.action.is_floating_point() or batch.action.is_complex() or batch.action.dtype == torch.bool:
+            raise TypeError("action must have integer index dtype")
+        if not batch.reward.is_floating_point():
+            raise TypeError("reward must have floating dtype")
+        if any(getattr(batch, name).dtype != torch.bool for name in ("terminated", "truncated", "valid")):
+            raise TypeError("Sequence flags and valid must have bool dtype")
+        if batch.horizon.dtype != torch.long or batch.horizon.shape != shape[:1]:
+            raise ValueError("horizon must have long dtype and shape (B,)")
+        if any(getattr(batch, name).device != batch.reward.device for name in ("valid", "horizon", "terminated", "truncated")):
+            raise ValueError("Sequence rewards, horizon and masks must be on the same device")
+        if not batch.valid[:, 0].all() or (batch.valid[:, 1:] & ~batch.valid[:, :-1]).any():
+            raise ValueError("valid must be a nonempty contiguous prefix")
+        if not torch.equal(batch.horizon, batch.valid.sum(1)):
+            raise ValueError("horizon must equal the number of valid transitions")
+        boundary = batch.terminated | batch.truncated
+        if (boundary[:, :-1] & batch.valid[:, 1:]).any():
+            raise ValueError("A sequence cannot cross an episode boundary")
+        short = batch.horizon < shape[1]
+        last_boundary = boundary.gather(1, (batch.horizon - 1).unsqueeze(1)).squeeze(1)
+        if (short & ~last_boundary).any():
+            raise ValueError("A short sequence must end at an observed episode boundary")
 
     @staticmethod
     def _validate(batch: TransitionBatch) -> None:
