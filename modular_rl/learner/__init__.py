@@ -3,6 +3,7 @@
 from modular_rl.learner.dqn import DQNLearner
 from modular_rl.learner.double_dqn import DoubleDQNLearner
 from modular_rl.learner.actor_critic import ActorCriticLearner
+from modular_rl.learner.a2c import A2CLearner
 from modular_rl.learner.tabular_q import TabularQLearner
 from modular_rl.learner.tabular_sarsa import TabularSARSALearner
 from modular_rl.learner.mc_prediction import MCPredictionLearner
@@ -21,6 +22,7 @@ __all__ = [
     'DQNLearner',
     'DoubleDQNLearner',
     'ActorCriticLearner',
+    'A2CLearner',
     'TabularQLearner',
     'TabularSARSALearner',
     'MCPredictionLearner',

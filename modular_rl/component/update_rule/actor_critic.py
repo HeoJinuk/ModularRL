@@ -1,4 +1,4 @@
-"""One-step actor-critic losses from supplied log probabilities, values and targets."""
+"""Actor-critic losses from supplied log probabilities, values and targets."""
 
 from math import isfinite
 from numbers import Real

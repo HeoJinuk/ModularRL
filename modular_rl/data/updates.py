@@ -1,4 +1,4 @@
-"""Results of neural TD loss calculation, independent of optimizer execution."""
+"""Neural loss results, independent of optimizer execution."""
 
 from dataclasses import dataclass
 
@@ -21,9 +21,10 @@ class TDLossOutput:
 class ActorCriticOutput:
     """Actor/critic mean losses, mean entropy, total loss and signed TD error.
 
-    The four metrics are scalar Tensors; td_error has shape (B,). All share
+    The four metrics are scalar Tensors; Rule td_error has shape (B,), and
+    A2CLearner restores its time-major (T,N) shape. All share
     the input floating dtype/device. The UpdateRule retains graphs except
-    the actor's advantage; ActorCriticLearner returns detached metrics.
+    the actor's advantage; ActorCriticLearner/A2CLearner return detached metrics.
     """
 
     actor_loss: Tensor
