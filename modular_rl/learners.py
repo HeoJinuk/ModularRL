@@ -9,4 +9,11 @@ from modular_rl.learner import OffPolicyMCPredictionLearner as OffPolicyMCPredic
 from modular_rl.learner import OffPolicyMCControlLearner as OffPolicyMCControl
 from modular_rl.learner import TabularTD0PredictionLearner as TD0Prediction
 
-__all__ = ['QLearning', 'SARSA', 'DQN', 'MCPrediction', 'MCControl', 'OffPolicyMCPrediction', 'OffPolicyMCControl', 'TD0Prediction']
+from modular_rl.learner import ExpectedSARSALearner as ExpectedSARSA
+from modular_rl.learner import DoubleQLearner as DoubleQ
+from modular_rl.learner import NStepSARSALearner as NStepSARSA
+from modular_rl.learner import OffPolicyNStepSARSALearner as OffPolicyNStepSARSA
+from modular_rl.learner import TreeBackupLearner as TreeBackup
+from modular_rl.learner import QSigmaLearner as QSigma
+
+__all__ = ['QLearning', 'SARSA', 'DQN', 'MCPrediction', 'MCControl', 'OffPolicyMCPrediction', 'OffPolicyMCControl', 'TD0Prediction', 'ExpectedSARSA', 'DoubleQ', 'NStepSARSA', 'OffPolicyNStepSARSA', 'TreeBackup', 'QSigma']

@@ -31,7 +31,8 @@ class DQNLearner:
     SequenceBatch rows additionally support reward-only n-step DQN. Their valid
     prefix supplies the actual horizon and last next observation; the current
     Target Model evaluates that endpoint. n_step_target_generator is optional
-    and defaults to the one-step generator's gamma. Configure matching gammas
+    and defaults to the one-step generator's gamma. A positional NStep generator
+    also configures a matching TD0 for one-step replay/planning. Configure matching gammas
     before construction; online on-policy multi-step algorithms are separate.
     """
 
@@ -40,7 +41,7 @@ class DQNLearner:
         online_model: Model,
         target_model: Model,
         optimizer: Optimizer,
-        target_generator: TD0TargetGenerator,
+        target_generator: TD0TargetGenerator | NStepTargetGenerator,
         update_rule: TDLossUpdateRule,
         *,
         n_step_target_generator: NStepTargetGenerator | None = None,
@@ -48,6 +49,11 @@ class DQNLearner:
         self.online_model = online_model
         self.target_model = target_model
         self.optimizer = optimizer
+        if isinstance(target_generator, NStepTargetGenerator):
+            if n_step_target_generator is not None and n_step_target_generator is not target_generator:
+                raise ValueError("Supply the n-step generator once, positionally or by keyword")
+            n_step_target_generator = target_generator
+            target_generator = TD0TargetGenerator(target_generator.gamma)
         self.target_generator = target_generator
         self.update_rule = update_rule
         self.n_step_target_generator = (
