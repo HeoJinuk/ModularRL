@@ -981,6 +981,38 @@ Tutorial §17 preserves all prior 87 cells and calls the same example functions.
 It compares fixed-policy DP Qpi RMSE over three seeds, six sigma settings and
 reuses the existing SARSA/Tree results. The CLI additionally covers n=1/3/5.
 
+## Tabular Dyna-Q component composition
+
+```bash
+python -m examples.gridworld_dyna_q --steps 2000 --seeds 7 11 19
+python -m pytest -q tests/test_dyna_q_composition.py tests/test_gridworld_dyna_q.py
+```
+
+The example-local `TabularWorldModel` predicts the latest observed outcome for
+each state/action pair. `plan(world_model, learner, steps=5, rng=planning_rng)`
+generates synthetic transitions and reuses **the existing TabularQLearner**;
+it neither steps an environment nor chooses a behavior action. Planning samples
+uniformly over observed pairs using a separate NumPy Generator. Empty-model
+planning performs no updates. External truncation is not learned as termination.
+
+Real updates precede model observation and one-step planning. Planning=0 matches
+the existing Q-learning action/update order exactly. Equal **real environment
+step** budgets, rather than episode budgets, compare Q-learning and planning
+budgets 0/5/10. A final partial episode is reported separately and bootstraps.
+
+`learn_real_n_step(learner, window)` composes existing TD0 backups and the Q update
+rule for real n=1/3/5, while planning stays one-step. Early real-update delays do
+not delay model observation/planning. Boundary tails flush after that step's
+planning, without additional actions or environment steps.
+
+[Notebook 07](notebooks/dlfs4/07_dyna_modularrl.ipynb) calls these example functions,
+compares three seeds with DP, and demonstrates offline model initialization and
+idle planning. Existing notebooks and all `modular_rl/` implementations remain
+unchanged. This is a deterministic tabular sample model; stochastic/continuous
+world models, prioritized planning and Dyna-DQN remain future work. Model, world
+model, RNGs, settings, pending real window and (for mid-episode resume) environment
+state are separate checkpoint responsibilities; see [architecture](docs/ARCHITECTURE.md#tabular-dyna-q-컴포넌트-조합-검증).
+
 ## Examples
 
 ```python

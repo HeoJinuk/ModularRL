@@ -2562,3 +2562,196 @@ Branch 통계의 matched rho는 1, different rho는 .8/1.2이며 실제 방문 �
 이번 Window의 끝점 Q=6인 Target은 9.604인데 다른 예제의 8.146을 옮긴 것이 원인이었다.
 참조값·문서를 정정하고 결정적인 숫자 비교 테스트를 추가한 뒤 전체 검증을 다시 통과했다.
 학습 알고리즘을 참조값에 맞춰 바꾸지 않았다.
+
+## Tabular Dyna-Q 컴포넌트 조합 검증
+
+이번 구현은 `examples/gridworld_dyna_q.py`의 작은 World Model과 함수 조합이다.
+`modular_rl/`의 공개 API·구현·Transition/Batch를 바꾸지 않고 DynaLearner/Agent/Runner를
+추가하지 않았다. 기존 설명의 WorldModel/Planner 미포함은 라이브러리 본체 기준이다.
+참고는 [Sutton & Barto 2판 Chapter 8, §8.2, pp.161–164](https://www.andrew.cmu.edu/course/10-703/textbook/BartoSutton.pdf)다.
+
+### 두 종류 Model과 공개 함수
+
+| 예제 API | 책임 |
+|---|---|
+| `TabularWorldModel().observe(transition)` | 관측한 (S,A)의 최신 R/S'/terminated 예측을 대체 |
+| `world.sample(rng) -> Transition` | 관측된 쌍 균등 추출 후 owned 가상 전이 생성 |
+| `world.reset()`, `len(world)` | 예측 초기화와 관측된 고유 쌍 수 |
+| `world.state_dict()`, `world.load_state_dict(state)` | 삽입 순서와 owned 예측 저장·복원 |
+| `plan(world, learner, *, steps, rng) -> Tensor` | 환경 없이 1-step Planning; 실제 갱신 수 길이의 signed TD Error |
+| `learn_real_n_step(learner, window) -> Tensor` | 실제 연속 B=1 Window의 최오래된 행 1개 갱신; error (1,) |
+| `run_steps(env, real_learner, *, steps, world_model=None, planning_learner=None, planning_steps=0, rng=None, n=1, seed=None)` | 고정 실제 Step 예산의 명시적 online 루프·통계 |
+| `train_and_evaluate(...)`, `comparison(steps=2000, seeds=(7,11,19))` | 별도 Greedy 환경·DP 기준과 예산/Seed 비교 |
+
+Q 추정 `Model`은 V/Q/정책 출력의 기존 façade다. World Model은 환경 동역학의 예측이다.
+알려진 `TabularMDP`를 읽어 World Model을 채우지 않으며 실제 관측만 `observe`한다.
+DP kernel은 실험 후 관측된 쌍의 예측 정확성 검증과 V* 참조 계산에만 사용한다.
+
+### World Model과 ReplayBuffer의 차이
+
+이 예제의 World Model은 `(state, action) -> 최신 Transition 결과` dictionary다.
+상태·행동은 정수 scalar, reward는 원래 floating dtype의 graph 없는 owned CPU scalar Tensor,
+다음 상태는 정수 scalar, terminated는 bool이다. 보상은 저장과 반환 시 복사한다.
+외부 `truncated`는 학습된 환경 종료가 아니므로 예측은 항상 `truncated=False`이고 log_prob은 None이다.
+두 종료 flag가 True인 실제 전이는 terminated=True를 보존한다. NaN/Inf reward와 잘못된
+scalar/index/flag 계약은 저장 전에 거절하며 잘못된 checkpoint는 기존 모델을 부분 대체하지 않는다.
+
+별도 NumPy Generator로 **관측된 (S,A) 쌍**을 균등 추출한다. 교재 p.164 의사코드의
+상태 균등 → 그 상태에서 관측한 행동 균등과는 상태별 관측 행동 수가 다르면 분포가 다르다.
+이번 요청의 쌍 균등 규칙을 따른다. 미관측 쌍의 결과는 만들지 않는다.
+빈 모델의 직접 sample은 ValueError이고 plan은 0개 error를 반환하며 RNG도 사용하지 않는다.
+
+ReplayBuffer는 개별 경험의 ring/history라서 같은 쌍의 과거 결과가 여러 개 남고,
+관측 빈도에 비례한 샘플 분포가 생긴다. Dataset/모델 학습 데이터 저장에는 재사용 가능하지만
+쌍별 최신 예측과 생성 모델 자체를 대신하지 않는다. 결정적 최신 결과 모델에서는 가상 전이의
+값이 마지막 실경험과 같은 것이 정상이다. 계획은 이 모델의 예측을 샘플링하며 과거 history를
+ReplayBuffer에서 재생하는 루프가 아니다. 확률적 환경에는 Outcome 빈도/확률 또는 학습 분포가
+추가로 필요하다. 이번 모델이 확률적 전이의 정확한 분포를 추정한다고 주장하지 않는다.
+
+### Real / Planning 학습 흐름과 갱신 순서
+
+1. Model.act → env.step → 실제 Transition/owned B=1 Batch.
+2. 기본 n=1은 기존 TabularQLearner.learn으로 직접 Q 갱신.
+3. World Model.observe로 실제 결과 반영.
+4. `plan`은 model.sample → 기존 learner.learn을 예산만큼 실행.
+5. 다음 행동은 모든 갱신 후 선택. 자연 종료/Truncation에서 reset.
+
+두 경로 모두 기존 TargetGenerator와 UpdateRule을 통해 계산하며 Q 수식을 복제하지 않는다.
+Planning은 환경·행동 Selector·실제 Window를 참조하지 않고 observe도 호출하지 않는다.
+정책 RNG는 기존 PyTorch RNG, 환경 RNG는 Gymnasium np_random, Planning RNG는 별도
+NumPy Generator다. plan의 max Q 평가와 학습은 행동 RNG를 소비하지 않는다.
+Planning을 늘리면 Q가 달라져 다음 행동/환경 궤적이 바뀔 수 있으며 RNG 독립성 위반이 아니다.
+
+동일 Q Model을 가진 별도 TabularQLearner를 전달하면 TargetGenerator와 UpdateRule 설정도
+독립적으로 줄 수 있다. 동일 Model 공유를 run_steps에서 확인한다. 예제 기본은 한 Learner를
+두 경로에서 공유한다. 장기적 독립 Target 전략이 필요하더라도 Model/Buffer API 변경은 필요 없다.
+
+Planning=0의 순서는 기존 `gridworld_sarsa.py`의 Q-learning 분기와 같다. 기존 예제는
+Episode 예산, 이번 루프는 정확한 실제 Step 예산이라 중단 조건만 다르다. 독립적인 기준
+루프로 같은 초기 Q/Seed/γ/α/ε·환경 제한에서 행동·reward·length·Target·TD Error·Q·Torch RNG를
+bit-exact 비교한다. World Model 관측만으로 행동 또는 Planning RNG는 소비하지 않는다.
+
+### Real n-step, Planning 1-step과 경계
+
+Real Window에는 실제 연속 Transition.to_batch만 넣는다. n=1은 기존 QLearner에 위임한다.
+m>1은 마지막 관측의 max Q에서 시작해 기존 TD0.generate를 보상 역순으로 합성하여
+`sum(gamma**k * reward[k]) + gamma**m * max Q(last_next_state)`를 만들고 기존 Q Rule로
+head만 갱신한다. 자연 종료는 TD0의 terminated mask로 Bootstrap을 제거한다.
+SARSA의 실제 endpoint 행동이나 Q(σ)의 Target 정책을 섞지 않는다.
+기존 n-step SARSA 예제의 Window 형식·연속성 및 n 검증 함수만 재사용한다.
+
+매 Step에 eligible head 1개를 처리한 뒤 모델을 관측하고 Planning을 실행한다.
+n=3의 처음 두 Step에도 observe/Planning은 수행하지만 아직 Real 업데이트는 없다.
+Episode 경계에서는 **그 Step의 Planning 후** 잔여 Real Window를 순서대로 Flush한다.
+각 flush는 당시 Q로 Target을 고정하고 Q를 갱신하며 다음 flush가 그 변경을 볼 수 있다.
+Flush는 env.step/act/observe/plan을 추가 호출하지 않는다. 따라서 실제 Step 100개는 Real 갱신
+100개, 모델 관측 100개, Planning=5이면 가상 갱신 500개다. n은 이 개수를 바꾸지 않는다.
+
+전역 실제 Step 예산이 중간 Episode에서 끝나면 마지막 전이에 외부 cutoff를 표시해
+최종 관측의 max Q로 Bootstrap하고 Window를 전부 Flush한다. env가 보고한 원래 flag와
+budget_cutoff를 trace에서 구별하고 부분 Episode의 reward/length는 완료 Episode 배열과
+분리한다. 자동 reset의 실제 final observation을 추론하지 않는다.
+모든 Target은 해당 head의 쓰기 전에 계산하며 여러 head/Planning 호출은 각각 현재 Q를 읽는다.
+
+### 수치·독립 실행·Checkpoint 검증
+
+Q(0,1)=2, 다음 Q=[4,6], r=1, γ=.9, α=.5에서 Real Target=6.4,
+error=4.4, 새 Q=4.2다. 모델이 같은 전이를 예측하면 Planning error=2.2, 새 Q=5.3이다.
+종료 r=3이면 큰 다음 Q에도 Target=3, 새 Q=2.5다. truncated-only는 Target=6.4를 유지한다.
+Planning 예산 0/1/5/10, 중복 쌍 순서, dtype/device와 in-place/no-graph 계약을 검증한다.
+
+Offline Transition을 world.observe로 사전학습해도 Q는 바뀌지 않는다. 이후 같은 쌍의 새 결과로
+온라인 대체가 가능하다. Idle Planning은 `plan(..., steps=k, rng=rng)`를 반복 호출하면 된다.
+실제 환경 state/RNG/elapsed_steps·World Model·행동 RNG를 보존하면서 Q와 Planning RNG만
+변할 수 있다. 중단/재개는 호출 사이에서 수행한다. wall-clock/async/sleep Scheduler는 없다.
+
+재개 시 Q Model.state_dict, World Model.state_dict, Planning bit_generator.state,
+Torch RNG(사용 시 CUDA RNG), γ/α/ε/n/Planning 예산과 Pending real Window를 함께 저장한다.
+World Model 삽입 순서는 같은 RNG 추출의 재현성에 필요하다. 테스트는 실제 파일 저장·복원 후
+고정 후속 경험과 행동 선택의 error/Q/RNG 일치를 검증한다. `run_steps`는 pending을 노출하는
+중간 checkpoint API가 아니다. 중간 재개에는 caller가 explicit window/learn/plan 조합을 소유한다.
+임의 환경의 Episode 중간 재개는 환경 내부 위치·RNG·TimeLimit 경과 Step도 복원해야 하며
+Model/World Model만으로 보장할 수 없다.
+
+### 구조 평가와 향후 확장
+
+- 기존 Q Model은 두 학습 경로에 충분하다. World Model은 Q Model과 독립적인 객체가 적절하다.
+  입력 실제 Transition, 출력 예측 Transition이 현재 표 형식에서 연결 경계가 된다. Neural/GPR
+  World Model은 자체 입력·예측·불확실성 계약을 정의하고 Planning 호출자가 기존 Transition/Batch로
+  명시적으로 변환할 수 있다. 학습용 Model 출력에 환경 예측을 억지로 추가하지 않는다.
+- 기존 QLearner는 1-step max bootstrap을 고정한다. n-step Return을 주입하는 메서드는 없으므로
+  Real n-step은 Model/TD0/Rule을 직접 조합하는 함수가 필요하다. 기존 두 경로의 1-step은 같은
+  QLearner를 재사용하며 서로 다른 horizon을 위해 핵심 API를 바꿀 필요는 없었다.
+- Window와 schedule은 외부 deque/실제 Step 루프, model update는 observe, Planning은 독립 plan으로
+  분리했다. World Model 관측이 Real n-step 업데이트 지연을 기다리지 않는다.
+- Uniform 검색제어는 sample 한 곳에 있다. Prioritized에는 쌍 ID·TD Error/priority·필요 시 predecessor,
+  All-action에는 후보 상태/가능 행동 목록, 신뢰도 기반에는 예측 불확실성·confidence가 필요하다.
+  단순 sample API만으로 이들 전략의 모든 feedback을 표현한다고 보장하지 않는다.
+  외부 Sampler를 모델과 완전히 독립적으로 교체하려면 관측 쌍 조회와 `predict(state, action)` 같은
+  지정 쌍 예측 경계를 분리하는 후속 설계가 필요하다. 이번 예제는 sample 한 곳의 쌍 균등 추출만 구현한다.
+- 모델 신뢰도 기반 Q(σ)-Planning에는 다단계 synthetic 경로·종료/시간 경계·정책 확률·sampling-time
+  σ/신뢰도·Return 재귀가 추가로 필요하다. 단일 전이 생성만으로 완성되지 않으며 이번에 구현하지 않았다.
+- Dyna-DQN은 기존 DQNLearner가 TransitionBatch를 받으므로 실제/가상 Batch source를 바꿀 여지가
+  있다. Q network/Target sync/Optimizer 상태·주기·두 source의 비율·분포 변화/모델 오차를 명시적으로
+  관리해야 한다. 학습된 Neural/GPR 환경 모델과 continuous action search는 별도 설계다.
+  현재 plan 함수는 TabularQLearner.model/q_table과 Tensor TD Error를 사용하므로 DQNLearner를
+  그대로 전달할 수는 없다. DQNLearner는 online_model과 TDLossOutput 계약을 가지므로 향후 작은
+  Neural Planning 함수에서 같은 sample→to_batch→learn 흐름을 연결하고 td_error/loss를 수집해야 한다.
+  이를 위해 공통 BaseLearner나 기존 Learner API 변경이 반드시 필요한 것은 아니다.
+  기존 ReplayBuffer는 log_prob 유무를 한 Buffer 안에서 혼합하지 못한다. 실제 전이의 log b와
+  가상 전이의 None을 유지하려면 source별 Buffer를 분리하고 Batch 조합/메타데이터 정책을
+  외부에서 정해야 한다. 가상 log probability를 0으로 만들어 넣지 않는다.
+  신경 환경모델의 확률적 예측이나 Dropout이 Torch RNG를 사용한다면 행동 Selector의 전역
+  Torch RNG와도 분리해야 한다. 현재 검증의 Planning RNG 독립성은 결정적 Tabular Q 경로다.
+- 관수·온도 제어의 연속 상태·지연·시간 간격은 이번 정수 최신 결과 테이블의 범위를 벗어난다.
+  Offline pretraining, online adaptation, idle planning의 실행 분리는 가능하지만 확률적 모델 학습,
+  drift 대응, 안정성/신뢰도 제어가 구현된 것으로 간주하지 않는다.
+- 실제 중복은 ordered window 검증/eligible-head/flush와 Target→Rule 연결이며 앞 n-step 예제들과
+  반복된다. Frozen Q snapshot·sampling-time metadata는 Return별 요구가 다르다. 공통화 후보는
+  owned Window, 명시적 horizon/boundary, snapshot, real/planning schedule, 예측과 검색제어 경계다.
+  새로운 BaseLearner/Factory/Registry나 알고리즘 조건문 Framework로 이번에 통합하지 않았다.
+
+```bash
+python -m examples.gridworld_dyna_q --steps 2000 --seeds 7 11 19
+```
+
+신규 `07_dyna_modularrl.ipynb`는 예제 함수만 호출해 1,000 Step×3 Seed 비교·그림과 Idle Planning을
+보여준다. 기존 04–06 Notebook의 셀·출력을 보존한다. 실험의 학습 성능은 결과로 보고하고
+단일 Seed의 최적 정책/RMSE 우위를 pytest 통과 조건으로 삼지 않는다.
+
+### Gridworld 실행 결과 (실제 2,000 Step/run)
+
+γ=.9, α=.8, ε=.1, Seed7/11/19, 6구성×3 Seed=18 run을 실행했다.
+총 실제 Step=Real 갱신은 36,000개, 가상 Planning 갱신은 150,000개다.
+모든 run의 별도 Greedy 평가가 목표까지 DP 최적 5 Step에 도달했다.
+아래 RMSE는 비종료 10개 상태의 max Q와 DP 최적 V 비교다(6자리 반올림).
+
+| 구성 | Seed7 | Seed11 | Seed19 | 평균±표준편차 |
+|---|---:|---:|---:|---:|
+| Q-learning / Dyna Planning=0 | .240595 | .069672 | .279962 | .196743±.091279 |
+| Dyna Planning=5 | <.000001 | .098377 | <.000001 | .032792±.046375 |
+| Dyna Planning=10 | <.000001 | <.000001 | .117240 | .039080±.055267 |
+| Real n=3 / Planning=5 | .166549 | .081283 | .119837 | .122556±.034863 |
+| Real n=5 / Planning=5 | .003355 | .000062 | .470413 | .157943±.220954 |
+
+Planning=0과 Q-learning은 궤적·Target·error·Q가 같았다. Planning=5/10은 각각
+10,000/20,000번의 가상 갱신을 추가했다. n=3/5의 Real 지연 중에도 매 Step 관측·Planning을
+수행했고 각각 총 2,000 Real 갱신을 마쳤다. Seed별 flush 수는 n=3: 568/690/698,
+n=5: 1278/1304/1320이다. n=1은 flush 0이다.
+World Model은 run별 관측한 25–39개 쌍에서 kernel과 정확히 같은 결과를 예측했다.
+불완전한 상태·행동 탐색과 제한된 갱신 때문에 Greedy 시작 경로가 최적이어도 모든 상태 max Q의
+RMSE가 0인 것은 아니다. Planning을 늘릴 때 탐색 경로가 바뀌어 관측 쌍도 달라지므로 예산별 RMSE가
+단조 개선되지 않는다. 고정 탐색 정책의 다단계 실제 보상을 쓰는 Real n-step max backup을
+샘플별 1-step Q-learning 또는 중요도 보정 off-policy return과 동일하다고 주장하지 않는다.
+
+### 최종 회귀 검증
+
+전체 `python -m pytest -q`는 **1,896 passed, 69 skipped(CUDA 미지원)**로 통과했다.
+실행 시간은 3,674.71초(1시간 1분 14초)이며 기존 대규모 Notebook 실험을 포함한다.
+신규 Dyna 단위·환경 테스트는 72 passed/14 skipped다. 기존 예제 16개 Smoke Test도 통과했다.
+
+04/05/06/07 네 Notebook을 각각 같은 Kernel에서 Run All 두 번 실행해 텍스트·수치·PNG가
+일치했다. 실행 payload는 저장된 Notebook 출력과도 같다. PNG는 총 37개(4/11/19/3개)다.
+07은 20개 셀/코드 10개/그림 3개이며 새 그림을 시각적으로 확인했다.
+기존 04–06 세 파일은 셀·출력·metadata를 포함한 전체 byte hash가 작업 전과 같고,
+`modular_rl/`의 기존 Python 61개 파일도 byte hash와 파일 집합이 같다.

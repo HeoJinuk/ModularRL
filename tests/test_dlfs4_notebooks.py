@@ -46,7 +46,8 @@ def _outputs(notebook):
     return result
 
 
-@pytest.mark.parametrize("name", ["04_dp_modularrl.ipynb", "05_mc_modularrl.ipynb", "06_td_modularrl.ipynb"])
+@pytest.mark.parametrize("name", ["07_dyna_modularrl.ipynb", "04_dp_modularrl.ipynb",
+                                  "05_mc_modularrl.ipynb", "06_td_modularrl.ipynb"])
 def test_run_all_twice_reproduces_text_and_figures_in_same_kernel(name, tmp_path, monkeypatch, plot_cache):
     monkeypatch.setenv("MPLCONFIGDIR", str(plot_cache / "matplotlib"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(plot_cache / "xdg"))
