@@ -46,12 +46,18 @@ def _verify_numeric(value):
 _verify_names = ('log','losses','epsilons','updates','rmse','errors','table','results',
                  'before','after','evaluation','summary','greedy_actions')
 _verify_payload = {k:_verify_numeric(globals()[k]) for k in _verify_names if k in globals()}
+_verify_payload['torch_rng'] = torch.get_rng_state().tolist()
+_verify_payload['rngs'] = {k: globals()[k].bit_generator.state
+                          for k in ('np_rng','update_rng','planning_rng') if k in globals()}
+if 'buffer' in globals() and hasattr(buffer, '_rng'):
+    _verify_payload['replay_rng'] = buffer._rng.bit_generator.state
 for _verify_name in ('reference','pi_result','vi_result'):
     if _verify_name in globals():
         _verify_value = globals()[_verify_name]
         _verify_payload[_verify_name] = _verify_numeric(_verify_value.values if hasattr(_verify_value,'converged') else _verify_value)
 for _verify_name in ('model','model1','model2'):
     if _verify_name in globals():
+        _verify_payload[_verify_name+'.state_dict'] = _verify_numeric(globals()[_verify_name].state_dict())
         _verify_estimator = globals()[_verify_name].estimator
         for _verify_table in ('v_table','q_table'):
             if hasattr(_verify_estimator,_verify_table):

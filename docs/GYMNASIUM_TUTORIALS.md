@@ -12,6 +12,21 @@ python -m jupyter lab notebooks/gymnasium
 Learner와 RNG를 새로 구성한다. 같은 Kernel에서 처음부터 Run All해도 상태를 다시
 초기화한다. FAST의 성공률은 학습 성능 판정 기준이 아니다.
 
+## 짧은 공개 API
+
+```python
+from modular_rl import Model
+from modular_rl import representations as R, estimators as E, selectors as S
+from modular_rl import buffers as B, targets as T, updates as U, learners as L
+model = Model(R.Identity(), E.TabularQ(16, 4), S.EpsilonGreedy(.1))
+learner = L.ExpectedSARSA(model, T.TD0(.99), U.TabularQ(.5))
+```
+
+기존 긴 이름과 동일한 클래스다. [공개 API 계약](API.md)에 모든 Learner의 생성자·입력·결과와
+DoubleQ.act, ordered window, Real n-step/Planning 1-step을 정리했다. 상태/행동 수 변수는
+N_STATES/N_ACTIONS로 구분해 Selector 모듈 S와 충돌하지 않게 한다. DLFS4 04–08의 소스는
+변경하지 않고 레거시 회귀 기준으로 유지한다.
+
 ## Notebook 목록과 지원 범위
 
 |Notebook|환경|학습·계산 계약|
@@ -23,7 +38,7 @@ Learner와 RNG를 새로 구성한다. 같은 Kernel에서 처음부터 Run All�
 |04_td_prediction|FrozenLake|Online B=1 V Prediction|
 |05_q_learning|FrozenLake|Tabular max-Q와 무작위 Replay|
 |06_sarsa|FrozenLake|갱신 전에 다음 행동을 한 번 선택하고 그대로 실행|
-|07_expected_sarsa|FrozenLake|기존 예제 조합 함수, 같은 Selector의 probabilities|
+|07_expected_sarsa|FrozenLake|L.ExpectedSARSA, 같은 Selector의 probabilities|
 |08_double_q|FrozenLake|독립 Model 두 개, 명시적인 Q 합과 업데이트 동전|
 |09_n_step_sarsa|FrozenLake|Online Window, 실제 선택한 Horizon 행동|
 |10_off_policy_n_step|FrozenLake|고정 Target Q Prediction, 수집 당시 Behavior 확률|
@@ -39,10 +54,10 @@ FrozenLake는 `map_name="4x4", is_slippery=False`다. 행동 ID는 Left/Down/Rig
 Prediction은 지정 정책을 평가한다. V에서 유도한 Greedy 화살표는 별도 진단으로 표시한다.
 CartPole은 Floating Observation과 Scalar Discrete Action을 사용한다.
 
-DP, MC/TD Prediction·Control, Q-learning, SARSA, DQN과 Buffer/Target/UpdateRule은
-라이브러리 API다. Expected SARSA, Double Q, Online multi-step, Dyna의 학습 조합
-함수와 TabularWorldModel/plan은 **examples 지원**이다. Notebook은 이 함수를
-재사용하며 Return 수식을 복사하지 않는다. Tree Backup/Q(σ)는 여기서 고정 정책의
+DP, MC/TD Prediction·Control, Q-learning, SARSA, DQN, Expected SARSA, Double Q,
+Online n-step SARSA, Off-policy n-step SARSA, Tree Backup, Q(σ)는 라이브러리 API다.
+이들의 학습 계산은 Notebook에서 공식 Learner를 구성해 호출한다. Dyna의
+TabularWorldModel/plan과 실험 수집·스케줄은 **examples 지원**이다. Return 수식은 복사하지 않는다. Tree Backup/Q(σ)는 여기서 고정 정책의
 평가다. Q(σ)는 교재 본문 식 (7.17)의 경계 정의를 따르며 의사코드와의 차이를 기록한다.
 공식 정오표에서 인정된 오류라고 단정하지 않는다.
 
@@ -68,7 +83,7 @@ Transition은 Episode와 Online B=1 갱신에도 필요하므로 유지한다. �
 ## Sequence 학습
 
 ```python
-sequence_buffer = SequenceReplayBuffer(10000, seed=7)
+sequence_buffer = B.SequenceReplay(10000, seed=7)
 sequence_buffer.add(state, action, reward, next_state, terminated, truncated)
 if sequence_buffer.num_sequences(length=3) >= 32:
     batch = sequence_buffer.sample(32, length=3)
@@ -94,10 +109,7 @@ valid는 행마다 비어 있지 않은 Prefix이고 horizon은 그 길이다. P
 Buffer는 Target을 계산하지 않는다. 실제 마지막 관측을 Reset 전에 제공하는 것은 수집자의 책임이다.
 
 ```python
-one_step = TD0TargetGenerator(gamma=.99)
-n_step = NStepTargetGenerator(gamma=.99)
-learner = DQNLearner(online, target, optimizer, one_step, update_rule,
-                     n_step_target_generator=n_step)
+learner = L.DQN(online, target, optimizer, T.NStep(.99), U.TDLoss())
 ```
 
 두 Generator의 gamma는 생성 시 일치해야 한다. 기존 다섯 인자 DQN 생성도 지원하며,
@@ -128,8 +140,8 @@ Tree Backup/Q(σ)의 중간 Q·정책·σ·Importance 정보와 Online 행동 �
 - 간편 add는 Transition 중첩을 없애고 환경 step 결과와 직접 대응한다.
 - 1-step/Sequence DQN은 learn과 Optimizer를 공유한다.
 - MC의 Episode, Online B=1의 Transition.to_batch는 여전히 명시적이다. 각 방법의 데이터 의미가 드러난다.
-- Expected SARSA/Double Q/multi-step은 examples 함수에 의존한다. 반복되는 dtype/device 준비와
-  Bootstrap 선택은 추후 작은 공통화 제안 대상이지만 이번에는 BaseLearner를 추가하지 않는다.
+- Expected SARSA/Double Q/multi-step은 공식 Learner를 직접 구성한다. 시간순 Window,
+  실제 endpoint 행동, sigma/log_prob 기록과 Flush는 계속 호출자 책임이다. BaseLearner는 없다.
 - On-policy의 다음 행동 선택·Flush·σ 메타데이터는 알고리즘별 책임이다.
 - 환경·탐색·동기화 스케줄과 Buffer RNG/Window Checkpoint는 호출자 책임이다.
   SequenceReplayBuffer의 공개 Checkpoint API는 이번 범위에 없다.
@@ -217,3 +229,31 @@ n-step 실행은 약 758초, 1-step은 약 102초였다. n-step은 더 많은 �
 작업 시 로그는 `/private/tmp/modularrl-sequence-full-01.log`,
 `/private/tmp/modularrl-sequence-core-final.log`, `/private/tmp/modularrl-gym-fast-04.log`에 보존했다.
 이 임시 로그·Kernel 상태·학습 데이터는 Git에 포함하지 않는다.
+
+## 공개 API 승격 후 재검증 (2026-10-15)
+
+Gymnasium 17개를 FAST로 같은 Kernel에서 두 번 실행해 수치·Model state_dict·RNG·그래프를
+비교했다. 별도의 작업 전/후 독립 실행 17쌍에서도 전체 정밀도의 학습 상태와 그래프가 일치했다.
+기존에 FULL 출력을 저장했던 05/15/16은 FULL을, 다른 Notebook은 FAST 출력을 유지했다.
+아래의 FULL 여섯 실험은 저장 모드와 별도로 실제 다시 실행한 결과다. 모두 Seed=7이다.
+
+|FULL 실험|Episode|환경 Step|업데이트|평가|
+|---|---:|---:|---:|---|
+|FrozenLake Q-learning|1500|10252|10252|100/100 성공, 평균 Reward 1.0|
+|FrozenLake SARSA|1500|15272|15272|100/100 성공, 평균 Reward 1.0|
+|FrozenLake Expected SARSA|1500|10010|10010|100/100 성공, 평균 Reward 1.0|
+|FrozenLake Double Q|1500|10208|10208|100/100 성공, 평균 Reward 1.0|
+|CartPole DQN|400|35232|34233|평균 Reward 9.2 → 186.55 (20 Episode)|
+|CartPole n=3 DQN|400|61342|60343|평균 Reward 9.2 → 287.0 (20 Episode)|
+
+Q-learning은 Step마다 Replay에서 하나를 샘플링하고 나머지 세 Tabular Control은 B=1 Online이다.
+동일한 Episode 수가 동일한 경험이나 Step 예산을 뜻하지 않는다. 두 CartPole도 Step·업데이트 수가
+다르므로 이 수치만으로 알고리즘의 우위를 주장하지 않는다. 기존 FULL 05/15/16의 PNG도 일치했다.
+
+기존 DLFS4 Notebook은 소스를 바꾸지 않는다. Notebook cwd에 프로젝트 루트가 없어도 예제의
+파일 기반 로딩이 동작해야 한다. Off-policy n-step/Tree Backup 예제의 원래 runpy 연결은 그
+호환 경로로 유지한다. 설치형 modular_rl의 학습 계산에는 examples/runpy 의존성이 없다.
+
+최종 전체 회귀: `python -m pytest -q` — **2,171 passed / 149 skipped**, 55분 7초.
+149개는 CUDA 미사용 환경의 Device 검사다. DLFS4 04–08 다섯 개와 Gymnasium 17개를
+각각 같은 Kernel에서 두 번 실행한 결과를 포함한다. 기존 예제 18개 Smoke Test도 통과했다.

@@ -1,13 +1,13 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer/SequenceReplayBuffer, TD/MC/n-step targets, TD UpdateRules, TabularQLearner, TabularSARSALearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner, Agent and other Neural Learners are not implemented as library APIs. Expected SARSA, Double Q, online multi-step methods and Dyna are example compositions; see the tutorial guide for their exact support boundaries.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer/SequenceReplayBuffer, TD/MC/n-step targets, TD UpdateRules, TabularQLearner, TabularSARSALearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner, Agent and other Neural Learners are not implemented as library APIs. Expected SARSA, Double Q, online n-step SARSA, off-policy n-step SARSA, Tree Backup and Q(σ) are public Learners. Dyna World Model/planning remain example compositions; see the API guide for exact support boundaries.
 
 ## Gymnasium algorithm notebooks
 
 [17 independent tutorials](docs/GYMNASIUM_TUTORIALS.md) in
 [`notebooks/gymnasium/`](notebooks/gymnasium/) show direct component construction,
 Gymnasium reset/step and visible learning loops: DP/MC/TD, Q-learning/SARSA,
-example-based multi-step compositions, Dyna, CartPole DQN and n-step DQN.
+public multi-step Learners, Dyna compositions, CartPole DQN and n-step DQN.
 Default mode is FULL; `MODULARRL_FAST=1` selects small API smoke budgets.
 Existing DLFS4 notebooks remain independent regression tutorials.
 
@@ -17,10 +17,36 @@ returns an owned `SequenceBatch`; `DQNLearner.learn(batch)` uses the new
 `NStepTargetGenerator` and current Target Network. See the tutorial guide for
 boundaries, padding, supported scope and actual learning results.
 
+## Concise public API
+
+```python
+from modular_rl import Model
+from modular_rl import representations as R, estimators as E, selectors as S
+from modular_rl import buffers as B, targets as T, updates as U, learners as L
+
+model = Model(R.Identity(), E.TabularQ(16, 4), S.EpsilonGreedy(.1))
+learner = L.ExpectedSARSA(model, T.TD0(.99), U.TabularQ(.5))
+replay = B.Replay(10000, seed=7)
+replay.add(0, 1, 1., 1, False, False)
+error = learner.learn(replay.sample(1))
+```
+
+Short names alias the existing classes; old imports, constructors, Model methods,
+state_dict and Pickle paths remain supported. [API contracts](docs/API.md) list all
+14 Learners, ordered-window inputs, Double Q behavior selection, DQN's positional
+`T.NStep` support and the boundary between installed APIs and example-only Dyna helpers.
+No Learner imports `examples` or loads external code with `runpy`.
+
+The older composition sections below retain the experiment rationale and legacy
+function calls. Their learning functions now delegate to the corresponding public
+Learners; collection loops and scheduling remain explicit in the examples.
+
 ## Layout
 
 ```text
 modular_rl/
+├── representations.py, estimators.py, selectors.py  # Concise class aliases
+├── buffers.py, targets.py, updates.py, learners.py  # Concise public namespaces
 ├── data/
 │   ├── outputs.py                  # ValueOutput / EstimatorOutput / ActionOutput
 │   ├── experience.py               # Transition / TransitionBatch
@@ -34,6 +60,12 @@ modular_rl/
 ├── learner/
 │   ├── tabular_q.py               # External replay batch → Q-learning update
 │   ├── tabular_sarsa.py           # External batch + actual next action → SARSA update
+│   ├── expected_sarsa.py          # Same-selector policy expectation → Q update
+│   ├── double_q.py                # Two independent Models, cross evaluation
+│   ├── n_step_sarsa.py            # Ordered window + actual endpoint action
+│   ├── off_policy_n_step_sarsa.py  # Recorded behavior probabilities → effective target
+│   ├── tree_backup.py             # Intermediate expectations and expected endpoint
+│   ├── q_sigma.py                 # Frozen sigma/log probability, Eq. 7.17 boundary
 │   ├── dqn.py                     # Online gather → target bootstrap → optimizer step
 │   ├── mc_prediction.py           # Complete episode → first/every sample average
 │   ├── mc_control.py              # Complete episode → state-action sample averages
@@ -773,8 +805,7 @@ outputs. Notebook dependencies are optional for the core library.
 
 ## Expected SARSA component composition
 
-Expected SARSA runs as a small **example function**, without a new Learner or any
-changes to `modular_rl/`. It reuses the same behavior Model/Selector, tabular Q
+Expected SARSA runs as **L.ExpectedSARSA**; the legacy example function delegates to the package implementation. It reuses the same behavior Model/Selector, tabular Q
 estimator, TransitionBatch, TD0TargetGenerator and TabularQUpdateRule:
 
 ```python
@@ -816,7 +847,7 @@ metrics are in [ARCHITECTURE.md](docs/ARCHITECTURE.md#expected-sarsa-컴포넌�
 ## Double Q-learning component composition
 
 `examples/gridworld_double_q_learning.py` uses two independent Models with
-TabularQEstimator buffers. No library Learner, extra estimator class or third
+TabularQEstimator buffers. L.DoubleQ now owns the learning calculation, without an extra estimator class or third
 behavior table is added; `modular_rl/` stays unchanged.
 
 ```python
@@ -869,7 +900,7 @@ analysis in [ARCHITECTURE.md](docs/ARCHITECTURE.md#double-q-learning-컴포넌�
 `Transition.to_batch()` snapshots. It starts learning as soon as n rewards are
 available, carries the actual next action selected before each update, and
 flushes every remaining head at an episode boundary without extra environment
-steps or action samples. There is no new Learner or library implementation change.
+steps or action samples. L.NStepSARSA now owns the learning calculation; the example function remains compatible.
 
 ```python
 from examples.gridworld_n_step_sarsa import learn_n_step_sarsa, run_episode
@@ -879,7 +910,7 @@ error = learn_n_step_sarsa(model, pending, target_generator, update_rule,
 result = run_episode(env, model, target_generator, update_rule, n=3, seed=7)
 ```
 
-The repository has no TDNTargetGenerator, SequenceReplayBuffer or n-step DQN.
+Reward-only NStepTargetGenerator, SequenceReplayBuffer and n-step DQN are separate APIs; they do not replace this ordered online SARSA contract.
 The example composes the existing TD0TargetGenerator backward through rewards:
 the final continuation is Q at the actual selected endpoint action, and each
 call applies the existing `reward + gamma * continuation` calculation. Only the
@@ -920,8 +951,7 @@ python -m examples.gridworld_off_policy_n_step_sarsa --episodes 200 --seeds 7 11
 
 This example evaluates a **fixed target policy**, using the existing Model,
 TabularQEstimator, EpsilonGreedyActionSelector, Transition/Batch, TD0TargetGenerator
-and TabularQUpdateRule. No library file or public API changes, or new Learner class,
-are needed. `learn_off_policy_n_step_sarsa(..., target_policy=pi,
+and TabularQUpdateRule. L.OffPolicyNStepSARSA now exposes that calculation as a public Learner. `learn_off_policy_n_step_sarsa(..., target_policy=pi,
 bootstrap_action=action, bootstrap_log_prob=log_b)` updates one ordered window head.
 Its dictionary distinguishes raw `G-Q` from the effective-target `td_error` returned
 by the existing rule, and records the target and importance ratio.
@@ -942,7 +972,7 @@ episode rewards/lengths, steps/updates, Q, rho statistics and effective sample s
 [ARCHITECTURE.md](docs/ARCHITECTURE.md#off-policy-n-step-sarsa-컴포넌트-조합-검증)
 describes coverage, checkpoint ownership and remaining collection-code overlap.
 The existing 59 cells and outputs of `06_td_modularrl.ipynb` are preserved.
-Control, n-step Expected SARSA and Q(sigma) remain future work.
+Control remains outside this fixed-policy example; Tree Backup and Q(sigma) are separately available Learners.
 
 ## Online n-step Tree Backup component composition
 
@@ -971,7 +1001,7 @@ The example reuses the existing on/off-policy SARSA comparators with uniform
 behavior, gamma=.9, alpha=.05 and matched/different fixed targets. It reports each
 policy's DP Qpi RMSE, reward/length, steps/updates, tables and seed statistics.
 Tutorial §16 calls the same functions and preserves all previous 69 cells/outputs.
-No library file, public API or Learner class is changed. Remaining recursive-return
+L.TreeBackup now exposes the same learning calculation. Remaining recursive-return
 and collection-interface limits are documented in
 [ARCHITECTURE.md](docs/ARCHITECTURE.md#online-n-step-tree-backup-컴포넌트-조합-검증).
 
@@ -985,7 +1015,7 @@ python -m examples.gridworld_q_sigma --episodes 200 --seeds 7 11 19 --ns 1 3 5
 uses the textbook's Eq. 7.17 with control variates. A scalar or frozen per-time
 sigma vector mixes intermediate `pi/b` and target action probabilities. Existing
 Model, TabularQEstimator, Selector, TransitionBatch, TD0TargetGenerator and
-TabularQUpdateRule remain unchanged; no Learner class is added.
+TabularQUpdateRule remain unchanged; L.QSigma now owns the existing learning calculation.
 
 The nonterminal horizon uses expected Q; termination ends at the last reward.
 Truncation uses the actual final observation, with no extra action during flush.

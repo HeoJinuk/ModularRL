@@ -1,5 +1,11 @@
 # ModularRL 아키텍처와 데이터 계약
 
+> 현재 공개 API는 [API.md](API.md)를 따른다. 아래 개발 단계별 조합 검증에서
+> “examples 전용/새 Learner 없음”은 당시 범위다. Expected SARSA, Double Q,
+> n-step SARSA, Off-policy n-step SARSA, Tree Backup, Q(σ)의 학습 계산은 현재 패키지로
+> 승격됐으며 이전 함수는 호환 위임 경로다. 수학과 수집·업데이트 순서는 유지한다.
+
+
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
 ReplayBuffer/SequenceReplayBuffer·TD(0)/MC/n-step TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·TabularSARSALearner·DQNLearner와
 Tabular DP, On/Off-policy Monte Carlo Prediction/Control 및 TD(0) Prediction 참조 구현이다.
@@ -3239,3 +3245,36 @@ notebooks (17 passed) covers all cases: 2,108 passed / 149 skipped. The long
 existing-notebook run itself reported 2,087 passed / 145 skipped in 3,100.31s;
 B=1 parameter cases added after its collection are covered by the final Core
 rerun. Exact commands and scope accounting are in GYMNASIUM_TUTORIALS.md.
+
+## 공개 API 간소화와 Learner 승격
+
+representations/estimators/selectors/buffers/targets/updates/learners는 실제 공개 모듈이다.
+짧은 이름은 기존 클래스를 그대로 re-export한다. 루트에는 Model을 공개하고 같은 이름의
+Estimator와 UpdateRule은 각 네임스페이스에 둔다. 클래스 이름·모듈·state_dict·Pickle 경로,
+Model의 forward/act/evaluate_q/encode와 기존 생성자는 유지한다. 전체 이름과 시그니처는
+[API.md](API.md)에 정리한다.
+
+학습 계산은 ExpectedSARSALearner, DoubleQLearner, NStepSARSALearner,
+OffPolicyNStepSARSALearner, TreeBackupLearner, QSigmaLearner로 이동한다. 패키지는
+examples/runpy에 의존하지 않는다. 설치 wheel만 사용하는 독립 프로세스에서 여섯 API를
+검증한다. 예제 learn 함수는 위임하고 dc2ecdc의 독립 수학·Online 스케줄 참조는 tests/_legacy_td에
+보존한다. 별도 초기 상태에서 Target/error/table/실제 행동/환경·행동 RNG/Flush를 비교한다.
+
+ExpectedSARSA는 Model의 현재 Selector로 한 estimate의 pi와 Q를 계산한다. DoubleQ는 두
+Model의 storage 독립성을 확인하고, estimate/act로 Q1+Q2의 명시적 행동 경로를 제공한다.
+update_first는 외부 RNG가 정하며 learn은 선택 Model의 argmax와 다른 Model의 평가를 조합한다.
+Model/Estimator에 복수 테이블 결합 책임을 추가하지 않는다.
+
+네 multi-step Learner는 외부의 연속적인 owned B=1 TransitionBatch window를 받아 head 하나만
+갱신한다. 공통 private window 검증만 재사용한다. 실제 next action의 사전 선택·재사용과
+수집 당시 log_prob/sigma, window pop·Tail Flush 시점은 외부 책임이다. TD0의 기존 역순 계산
+순서를 유지해 산술 재배열로 실험 결과를 바꾸지 않는다. 무작위 Replay는 Online window와 다르다.
+TreeBackup/QSigma의 중간 기대값·보정 계수를 reward-only NStep 계산에 강제하지 않는다.
+식 (7.17)의 본문 경계, σ=0 TreeBackup, n=1 Expected SARSA, σ=1 Control Variate와
+중복 Importance Ratio 금지 계약은 그대로다. 의사코드 차이는 공식 인정 오류로 단정하지 않는다.
+
+DQN은 기존 TD0 + keyword n_step_target_generator 계약에 더해 네 번째 인자로 NStep을 받는다.
+이 경우 제공된 NStep은 sequence 경로에, 같은 gamma의 TD0는 1-step 경로에 사용한다.
+optimize/sync_target 및 Online/Target/Optimizer의 공유·Gradient 경계는 바꾸지 않는다.
+Dyna의 Real n-step과 Planning 1-step은 같은 Learner를 재사용한다. WorldModel/Planner와
+환경·학습 스케줄은 examples에 남기며 새로운 범용 Learner/Factory/Runner를 만들지 않는다.
