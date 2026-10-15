@@ -4,7 +4,7 @@
 > “examples 전용/새 Learner 없음”은 당시 범위다. Expected SARSA, Double Q,
 > n-step SARSA, Off-policy n-step SARSA, Tree Backup, Q(σ)의 학습 계산은 현재 패키지로
 > 승격됐으며 이전 함수는 호환 위임 경로다. Dyna World Model/Planner, Double DQN과
-> 1-step Actor-Critic도 현재 라이브러리 API다. 과거 검증 절은 당시 기록이며 현재 계약은
+> 1-step Actor-Critic과 Vector Rollout A2C도 현재 라이브러리 API다. 과거 검증 절은 당시 기록이며 현재 계약은
 > 아래 최신 절과 API.md를 따른다. 수학과 수집·업데이트 순서는 유지한다.
 
 
@@ -14,7 +14,7 @@ Tabular DP, On/Off-policy Monte Carlo Prediction/Control 및 TD(0) Prediction �
 Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole, DP/MC/TD Prediction 비교는
 Sutton Gridworld, On/Off-policy MC Control은 교재 3×4 Gridworld에서 실행할 수 있다.
 Runner/Agent, 연속 관측 Learned World Model, SAC/PPO는 아직 포함되지 않는다.
-Expected SARSA·Double Q·Online multi-step·Dyna·Double DQN·1-step Actor-Critic은 라이브러리 API다. 신규 Gymnasium Notebook과
+Expected SARSA·Double Q·Online multi-step·Dyna·Double DQN·1-step Actor-Critic·A2C는 라이브러리 API다. 신규 Gymnasium Notebook과
 Sequence Replay/DQN n-step 경로의 현재 계약은 문서 마지막 절과 GYMNASIUM_TUTORIALS.md에 정리한다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
@@ -3351,4 +3351,126 @@ signed td_error `(B,)`를 담는 frozen dataclass다. dtype/device는 입력을 
 
 Model·Optimizer state_dict와 수집 RNG가 재개 상태다. 예제는 Dropout/BatchNorm 없는 MLP를
 쓰며, 사용자 상태적/확률적 Network의 행동 수집·재평가 일치는 호출자 책임이다.
-연속 행동 AC, A2C/A3C, PPO, GAE와 일반 Rollout Framework는 이번에 추가하지 않는다.
+연속 행동 AC, A3C, PPO, GAE와 일반 Runner Framework는 아직 없다. A2C는 아래 별도 계약이다.
+
+## Async Vector Rollout과 A2C — 현재 계약
+
+기존 B=1 `L.ActorCritic`은 수정하지 않았다. `L.A2C`는 여러 환경의 시간순 경험을 받아
+하나의 동기식 업데이트를 수행한다. 환경 Worker의 Async 실행을 A3C의 비동기 파라미터 갱신으로
+해석하지 않는다. Model/Estimator/Selector와 기존 DQN·SARSA·Dyna 및 Replay/SequenceReplay의
+API·계산·Checkpoint key는 그대로다. 새 Base Class나 Runner/Collector Framework는 없다.
+
+### Rollout 자료와 소유권
+
+`RolloutBatch`의 observation/next_observation은 `(T,N,*obs_shape)`, action/reward/terminated/
+truncated/value/log_prob은 `(T,N)`다. action은 integer, 경계는 bool, Reward/V/log_prob은 floating이다.
+관측 dtype과 Feature Shape를 강제로 바꾸지 않는다. Replay `(B,...)`나 한 Episode의 무작위 Window인
+SequenceBatch `(B,T,...)`와 서로 다른 자료형이다. 여러 Episode 경계를 포함할 수 있다.
+
+`B.Rollout(horizon, n_envs).add(..., value=..., log_prob=...)`는 한 vector step을 detach·CPU 복사한다.
+get은 정확히 horizon개 step의 독립 stack을 반환하고 자동 clear하지 않는다. 가득 찬 상태의 add와
+부분 Rollout의 get은 거절한다. clear 후 schema를 새로 정해 재사용한다. len은 vector step 수다.
+계속되는 환경은 이전 next_observation과 다음 observation이 같아야 하고, 경계에서만 Reset으로
+연결이 바뀔 수 있다. Buffer는 환경·RNG·Return·Optimizer나 Gymnasium info를 소유/해석하지 않는다.
+`.to(device, dtype=...)`는 floating 필드만 변환하며 integer/bool을 보존한다.
+
+### SAME_STEP과 프로세스 수명
+
+수집자는 먼저 `validate_vector_env(env)`로 Box 관측·0-based Discrete 행동과 SAME_STEP을 검사한다.
+Gymnasium Vector constructor도 Worker 간 동일 space를 검사한다. SAME_STEP은 Gymnasium >=1.1을
+요구하며 1.4.0에서 검증했다. 기존 비 Vector 기능의 의존성과 동작은 유지한다.
+
+경계에서 step의 반환 관측은 Reset 상태다. `final_observations(returned, terminated, truncated, info)`가
+`final_obs`/`_final_obs`를 검사해 실제 전이 끝점만 복사한다. 이 배열은 Buffer에, 원래 returned는
+다음 행동 선택에 사용한다. 필요한 Final 관측/Mask가 없거나 shape/dtype이 다르면 실패하며 Reset을
+Bootstrap으로 대체하지 않는다. [공식 Autoreset 계약](https://farama.org/Vector-Autoreset-Mode)과
+설치된 소스를 함께 확인했다.
+
+환경은 외부 수집 루프가 reset/step/close하고 Seed를 관리한다. Notebook은 환경별 Seed 7/8/9/10과
+Torch 행동 RNG를 사용한다. 정상 종료는 close, 예외는 close(terminate=True) 후 재발생시켜 살아 있는
+Worker도 정리한다. 실제 spawn Async와 Sync를 비교해 행동 실행·Final/Reset 관측·Seed 재현성과
+의도적인 Worker 오류 후 전체 프로세스 종료를 검사했다.
+
+NEXT_STEP/DISABLED는 거절한다. NEXT_STEP의 Reset-only 반환을 경험으로 추가하면 안 되며 환경별
+유효 길이가 달라질 수 있다. 향후 별도 계약을 설계하기 전까지 더미 전이로 고정 `(T,N)`을 채우지 않는다.
+
+### Boundary-aware Multi-step Return
+
+`T.RolloutReturn(gamma).generate(reward, next_value, terminated, truncated)`는 동일한 `(T,N)`
+shape/device의 Tensor를 받는다. reward/next_value는 같은 floating dtype, 두 Mask는 bool이다.
+next_value는 각 실제 next_observation에서 외부가 평가한 V다. 내부는 역순 수식만 계산한다.
+
+```text
+G = next_value[-1]
+for t in reversed(time):
+    bootstrap = next_value[t] if truncated[t] else G   # elementwise by environment
+    bootstrap = 0 if terminated[t] else bootstrap
+    G = reward[t] + gamma * bootstrap
+```
+
+자연 종료는 Bootstrap과 다음 Reward Trace를 제거한다. truncated-only는 해당 Final V를 쓰지만
+다음 Episode Reward와 연결하지 않는다. 두 flag가 True면 자연 종료가 우선이다. 끝나지 않은 마지막
+Step은 마지막 수집 이후 관측의 V를 사용한다. 사용하지 않는 terminal NaN Bootstrap도 마스킹한다.
+자동 Broadcasting·NumPy 변환·Model 호출·device 이동·detach는 없다. Generator의 graph는 보존하고
+Learner가 eval/no_grad에서 next V와 Return을 고정한다. 기존 NStep의 Prefix/Endpoint 계약은 유지한다.
+
+gamma=.9, reward=[1,2,3], 마지막 next V=30이면 Return은 `[27.1,29,30]`이다.
+중간 t=1이 자연 종료면 `[2.8,2,30]`, truncated-only이고 Final V=20이면 `[19,20,30]`이다.
+새 Episode의 30은 이전 경계를 넘지 않는다. T=1,N=1은 기존 TD0와 같다.
+
+### A2C Loss와 최신 정책 계약
+
+`L.A2C(model, optimizer, T.RolloutReturn(gamma), U.ActorCritic(...)).learn(rollout)`은 T*N개
+관측/행동을 flatten하고 현재 Categorical Policy와 scalar V, 선택 행동 log_prob, entropy를 재평가한다.
+모든 실제 next V와 Return을 갱신 전에 계산한 뒤 기존 Rule에 전달한다. `advantage=return-value`,
+Actor Advantage detach, `.5*advantage**2` Critic Loss, Entropy Bonus와 전체 표본 평균을 유지한다.
+한 Rollout마다 단 한 번 zero_grad/backward/step한다. T=1,N=1에서 기존 AC와 Target/Loss/Gradient/
+Optimizer Momentum/Parameter 갱신이 일치한다. BatchNorm/Dropout은 일관된 eval 모드로 통제한 경우도 검사했다.
+
+수집 V/log_prob은 Gradient 원천이 아니다. 현재 재평가 값과 Snapshot을 rtol=1e-5, atol=1e-6으로
+비교해 관측 가능한 정책 변경을 Optimizer Step 전에 거절한다. 이는 모든 Parameter 변경이나
+데이터 출처를 인증하지는 않는다. 수집 동안/첫 learn 전까지 정책 고정과 Rollout 1회 사용은 호출자
+책임이다. 상태적/확률적 Network에는 수집·재평가의 일관된 eval Forward를 권장한다(eval도 미분 가능).
+검증을 위해 새 Policy Version Framework나 Model API를 추가하지 않았다.
+
+반환은 기존 frozen `ActorCriticOutput`이다. 네 Loss/Entropy 지표는 detached scalar,
+signed multi-step `td_error=return-current_value`는 detached `(T,N)`이며 Model dtype/device를 따른다.
+Rule의 `(B,)`와 기존 AC의 `(1,)` 결과는 유지한다. Model/Optimizer state_dict를 함께 복원하면 같은
+새 Rollout에서 갱신을 재현한다. 수집 중 재개에는 환경·Torch RNG, 부분 Rollout과 정책 최신성/진행
+상태도 필요하다. 이 단계에서 범용 Checkpoint/Runner는 만들지 않는다.
+
+### CartPole FULL 비교 — 이번 실행, Seed 7
+
+Tanh MLP(64), Categorical+V, Adam(.001), gamma=.99, value_coef=.5, entropy_coef=.01,
+CPU float32/Torch thread=1과 각각 80,000 환경 전이를 사용했다. 평가는 별도 CartPole 20 Episode,
+seed=1007+i의 Greedy다. A2C Worker Seed는 7/8/9/10, 단일 AC는 7이다. 경험 궤적이 같다는 뜻은 아니다.
+
+|Learner|N / T|환경 전이|Optimizer Step|표본/갱신|기록 Episode|평가 전 → 후|
+|---|---|---:|---:|---:|---:|---:|
+|기존 1-step AC 재실행|1 / 1|80000|80000|1|619|9.20 → 500.00|
+|A2C|4 / 5|80000|4000|20|1231|9.20 → 465.55|
+
+각 경험은 한 번만 사용했다. 18 원본은 그대로 두고 별도 Kernel에서 FULL을 재실행했고, 19에는 실제
+FULL 출력/그래프를 저장했다. N=4/T=5는 실제 학습이 확인된 초기 설정이며 단일 Seed 결과로 보편적
+우위를 주장하지 않는다. 500 보상은 pytest 조건이 아니다. A2C는 예산 끝의 열린 Episode flag를 조작하지 않는다.
+기존 18은 원래 예제의 마지막 수집 cutoff(193 Step)도 truncated로 기록하므로 619개 중 하나는
+실제 환경 TimeLimit 종료가 아니다. 이 기존 수집 동작은 유지했다. terminated=False이므로 TD0의
+Bootstrap은 그대로이며, 환경 전이/업데이트 예산과 별도 Greedy 평가 비교에는 영향을 주지 않는다.
+
+### 검증과 다음 재사용
+
+결정적 검사는 Snapshot/Shape/dtype/device, T=1/3/5와 N=1/4, 환경별 다른 경계, gamma=0/.9/1,
+Truncation 뒤 보상 비연결, Gradient, 정책 변경 거절, checkpoint와 실제 Async→Buffer→A2C를 검사한다.
+CUDA는 별도 매개변수로 분리하며 현재 CPU 환경은 Skip한다. wheel을 임시 경로에 설치한 `python -I`에서
+저장소/examples 없이 실제 spawn Rollout/A2C 학습과 모든 Worker 종료도 통과했다.
+
+관측·행동·수집 V/log_prob·실제 다음 관측과 두 경계 Mask는 향후 GAE/PPO에서 재사용할 수 있다.
+GAE lambda Trace, PPO Ratio/Clipping/다중 Epoch·Minibatch, 연속 행동, Recurrent state와
+부분 Rollout/NEXT_STEP은 아직 없다. 기존 Replay/Sequence를 대체하지 않는다.
+
+최종 전체 `python -m pytest -q`: **2337 passed / 191 skipped**, 3379.50초(56분 19초).
+191개는 CUDA를 사용할 수 없는 환경의 조건부 Device 검사다. DLFS4 04–08 다섯 개와
+Gymnasium 기존 19개 + A2C 1개를 각각 같은 Kernel에서 두 번 실행한 수치·RNG·출력·PNG
+재현성 검증을 포함한다. 관련 수학·API·기존 AC 검사는 별도 실행에서도 138 passed / 34 skipped였다.
+기존 예제 18개 Smoke Test와 격리 wheel 학습을 통과했다. 기존 Notebook의 사용자 변경과
+미추적 파일은 그대로 보존했으며, 신규 19에만 실제 FULL 출력을 저장했다.

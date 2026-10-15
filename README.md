@@ -1,13 +1,13 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer/SequenceReplayBuffer, TD/MC/n-step targets, TD UpdateRules, TabularQLearner, TabularSARSALearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner and Agent are not implemented as library APIs. Double DQN and immediate one-step categorical Actor-Critic are public Neural Learners. Expected SARSA, Double Q, online n-step SARSA, off-policy n-step SARSA, Tree Backup and Q(σ) are public Learners. Dyna World Model/planning are installed library APIs; see the API guide for exact support boundaries.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer/SequenceReplayBuffer, TD/MC/n-step targets, TD UpdateRules, TabularQLearner, TabularSARSALearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner and Agent are not implemented as library APIs. Double DQN, immediate one-step categorical Actor-Critic and vector-rollout A2C are public Neural Learners. Expected SARSA, Double Q, online n-step SARSA, off-policy n-step SARSA, Tree Backup and Q(σ) are public Learners. Dyna World Model/planning are installed library APIs; see the API guide for exact support boundaries.
 
 ## Gymnasium algorithm notebooks
 
 [19 independent tutorials](docs/GYMNASIUM_TUTORIALS.md) in
 [`notebooks/gymnasium/`](notebooks/gymnasium/) show direct component construction,
 Gymnasium reset/step and visible learning loops: DP/MC/TD, Q-learning/SARSA,
-public multi-step Learners, Dyna planning, CartPole DQN/n-step DQN, Double DQN and one-step Actor-Critic.
+public multi-step Learners, Dyna planning, CartPole DQN/n-step DQN, Double DQN, one-step Actor-Critic and vector-rollout A2C.
 Default mode is FULL; `MODULARRL_FAST=1` selects small API smoke budgets.
 Existing DLFS4 notebooks remain independent regression tutorials.
 
@@ -73,8 +73,26 @@ Actor-Critic recomputes policy log probabilities with gradients, detaches actor
 advantages, and supports fresh on-policy **B=1 immediate updates** only. It has no
 replay or target network. See [API contracts](docs/API.md) for outputs, modes and
 checkpoint ownership, and [notebooks 13/14/17/18](docs/GYMNASIUM_TUTORIALS.md) for
-explicit construction, training loops and measured results. A2C/A3C/PPO/GAE and
+explicit construction, training loops and measured results. A3C/PPO/GAE and
 continuous Actor-Critic remain future work.
+
+### Async vector rollout and A2C
+
+[`19_a2c.ipynb`](notebooks/gymnasium/19_a2c.ipynb) uses Gymnasium
+`AsyncVectorEnv(autoreset_mode=AutoresetMode.SAME_STEP)`, `B.Rollout(5, 4)`,
+`T.RolloutReturn(.99)` and `L.A2C(model, optimizer, target_generator, update_rule)`.
+The four environments run in worker processes; learning synchronously uses
+20 fresh transitions per optimizer step. Natural termination stops bootstrap;
+time-limit truncation bootstraps from `final_obs` while stopping the reward trace.
+Reset observations are used only for the next policy step. NEXT_STEP is rejected.
+
+Rollout data use `(T,N,...)` and preserve detached collection-time V/log_prob
+snapshots. Learner recomputes differentiable policy/value estimates and reuses
+`U.ActorCritic`. Existing immediate B=1 `L.ActorCritic` is unchanged. See
+[API.md](docs/API.md#vector-rollout-and-a2c) and the latest
+[architecture contract](docs/ARCHITECTURE.md#async-vector-rollout과-a2c--현재-계약).
+Vector SAME_STEP requires Gymnasium >=1.1; the existing non-vector APIs retain
+their dependency and behavior contracts. FAST/FULL modes remain available.
 
 ## Layout
 

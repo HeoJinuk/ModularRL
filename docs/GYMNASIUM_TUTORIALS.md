@@ -50,6 +50,10 @@ N_STATES/N_ACTIONS로 구분해 Selector 모듈 S와 충돌하지 않게 한다.
 |16_n_step_dqn|CartPole|SequenceReplay -> NStepTargetGenerator -> DQNLearner.learn|
 |17_double_dqn|CartPole|DQN/Double DQN의 환경 step·Gradient Update·Sync 예산 통제|
 |18_actor_critic|CartPole|Categorical Policy/Scalar V, B=1 즉시 On-policy 학습|
+|19_a2c|CartPole|Async SAME_STEP, 시간 우선 Rollout, 경계별 Multi-step Return, T*N당 1회 학습|
+
+19는 SAME_STEP을 지원하는 Gymnasium >=1.1이 필요하다(이번 검증 1.4.0).
+기존 환경이 1.0이면 `python -m pip install 'gymnasium>=1.1'`로 새 Vector 실습 의존성을 준비한다.
 
 FrozenLake는 `map_name="4x4", is_slippery=False`다. 행동 ID는 Left/Down/Right/Up이다.
 알려진 P는 DP와 참조값 진단에만 사용하며, Dyna 모델에는 관측한 전이만 기록한다.
@@ -60,7 +64,8 @@ DP, MC/TD Prediction·Control, Q-learning, SARSA, DQN, Expected SARSA, Double Q,
 Online n-step SARSA, Off-policy n-step SARSA, Tree Backup, Q(σ)는 라이브러리 API다.
 이들의 학습 계산은 Notebook에서 공식 Learner를 구성해 호출한다. Dyna의
 World Model/Planner도 `W.Tabular`/`P.Dyna`의 설치형 API다. Double DQN과 1-step Actor-Critic도
-공식 Learner다. 실험 수집·스케줄은 외부 루프에 둔다. Return 수식은 복사하지 않는다.
+공식 Learner다. A2C도 B.Rollout/T.RolloutReturn/U.ActorCritic을 조합한 공식 Learner다.
+실험 수집·스케줄은 외부 루프에 둔다. Return 수식은 복사하지 않는다.
 Tree Backup/Q(σ)는 여기서 고정 정책의
 평가다. Q(σ)는 교재 본문 식 (7.17)의 경계 정의를 따르며 의사코드와의 차이를 기록한다.
 공식 정오표에서 인정된 오류라고 단정하지 않는다.
@@ -285,7 +290,7 @@ Entropy·TD Error, 학습 전후 별도 Greedy Return을 표시한다. Replay �
 기존 개발 단계별 수치와 당시 지원 범위는 위의 날짜별 검증 기록이다. 현재 API의 정확한 계약은
 [API.md](API.md)를 따른다. 새로운 Notebook도 같은 Kernel에서 처음부터 Run All하면 Model,
 Optimizer, 환경과 RNG를 초기화한다. 성능은 단일 Seed 관찰이며 확률적 성능을 pytest 합격 조건으로
-쓰지 않는다. 현재 지원 범위에 A2C/A3C/PPO/GAE나 연속 행동 AC를 포함하지 않는다.
+쓰지 않는다. A2C는 아래 19번의 별도 Rollout 계약을 사용하며 A3C/PPO/GAE와 연속 행동 AC는 아직 없다.
 
 ### 이번 FULL 실행 결과 (Seed 7)
 
@@ -335,3 +340,27 @@ Gymnasium 19개와 DLFS4 04–08의 5개 Notebook을 각각 같은 Kernel에서 
 `examples`를 차단한 독립 Python 프로세스에서 기존 승격 API 및 W.Tabular/P.Dyna/DoubleDQN/
 ActorCritic의 실제 학습을 검증했다. Model/Estimator/Buffer/TargetGenerator 공개 계약은 유지했다.
 작업 전부터 있던 Notebook 수정과 미추적 연습·체크포인트 파일은 보존하고 커밋에서 제외했다.
+
+## 19: Async Rollout A2C
+
+직접 AsyncVectorEnv를 만들고 SAME_STEP을 검사한 뒤 N개 실제 Step을 반복한다.
+`final_observations` 결과는 전이의 next_observation으로, 반환된 Reset 관측은 다음 행동으로 쓴다.
+`B.Rollout(horizon=5,n_envs=4)`는 시간 우선 Snapshot을 보관하고, get/learn/clear로 재사용한다.
+학습은 `T.RolloutReturn`과 기존 `U.ActorCritic`을 쓰며 Return을 Notebook에서 재구현하지 않는다.
+마지막 Rollout의 Return과 Advantage, Episode 곡선, Loss/Entropy, Greedy 평가를 표시한다.
+
+기본은 FULL 80000 환경 전이 / 20000 vector step / 4000 Optimizer Step이다.
+FAST는 400 환경 전이 / 20 업데이트다. 기존 18의 FULL 80000회 B=1 갱신과 달리
+한 번에 20개 새 경험을 평균하되 각 경험의 사용 횟수는 둘 다 한 번이다. N=4/T=5의
+이번 Seed 7 실행은 1231 Episode와 Greedy 평가 9.20→465.55를 기록했다. 동일 예산의
+18 별도 재실행은 기록 619 Episode, 9.20→500.00이었다. 기존 18의 619에는 마지막 수집 cutoff를
+truncated로 기록한 193-Step 구간 하나가 포함된다. A2C는 열린 구간 flag를 바꾸지 않는다.
+동일한 경험이나 일반적 우열을 뜻하지 않는다.
+
+정상/예외 경로에서 Worker를 모두 종료한다. 정책은 Rollout 동안 고정하고 저장 log_prob으로
+직접 역전파하지 않는다. 일관된 eval 모드는 Gradient를 끄지 않는다. NEXT_STEP, GAE/PPO,
+연속 행동, Recurrent state와 부분 Rollout은 아직 없다. 최신 계약은 API/ARCHITECTURE의 A2C 절을 따른다.
+
+이번 전체 회귀는 **2337 passed / 191 skipped**, 56분 19초다. Gymnasium 20개와 DLFS4 5개의
+두 차례 Run All 수치·RNG·텍스트·PNG 검증을 포함한다. CUDA 미사용 조건부 검사는 Skip했다.
+기존 예제 18개 Smoke Test와 examples 없는 격리 wheel의 Async→Rollout→A2C 학습도 통과했다.

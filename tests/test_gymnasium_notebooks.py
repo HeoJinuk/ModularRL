@@ -45,7 +45,8 @@ def _verify_numeric(value):
 
 _verify_names = ('log','losses','epsilons','updates','rmse','errors','table','results',
                  'before','after','evaluation','summary','greedy_actions',
-                 'actor_losses','critic_losses','entropies','td_errors','target_syncs')
+                 'actor_losses','critic_losses','entropies','td_errors','target_syncs',
+                 'returns','advantages')
 _verify_payload = {k:_verify_numeric(globals()[k]) for k in _verify_names if k in globals()}
 _verify_payload['torch_rng'] = torch.get_rng_state().tolist()
 _verify_payload['rngs'] = {k: globals()[k].bit_generator.state
@@ -81,7 +82,7 @@ print(_verify_json.dumps(_verify_payload, sort_keys=True, allow_nan=False))
 DIRECTORY = Path(__file__).resolve().parents[1] / 'notebooks' / 'gymnasium'
 NAMES = ['00_api_basics','01_dp','02_mc_prediction','03_mc_control','04_td_prediction','05_q_learning',
          '06_sarsa','07_expected_sarsa','08_double_q','09_n_step_sarsa','10_off_policy_n_step','11_tree_backup',
-         '12_q_sigma','13_dyna_q','14_dyna_dqn','15_dqn','16_n_step_dqn','17_double_dqn','18_actor_critic']
+         '12_q_sigma','13_dyna_q','14_dyna_dqn','15_dqn','16_n_step_dqn','17_double_dqn','18_actor_critic','19_a2c']
 
 
 @pytest.mark.parametrize('name', NAMES)

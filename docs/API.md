@@ -222,4 +222,74 @@ Target을 공급하고 zero_grad/backward/step한다. 수집 당시 detached log
 `data.ActorCriticOutput`은 frozen dataclass다. actor_loss, critic_loss, entropy, total_loss는
 scalar Tensor이고 signed td_error는 `(B,)`다. dtype/device는 모델을 따른다. Rule 출력은 graph를
 유지하고 Learner 출력은 전부 detach된 업데이트 직전 지표다. Model과 Optimizer state_dict,
-행동·환경 RNG를 함께 복원한다. 연속 행동, A2C/A3C, PPO, GAE는 이번 범위에 포함하지 않는다.
+행동·환경 RNG를 함께 복원한다. 연속 행동, A3C, PPO, GAE는 이번 범위에 포함하지 않는다.
+Vector Rollout의 A2C는 아래 별도 Learner를 사용한다.
+
+## Vector Rollout and A2C
+
+```python
+buffer = B.Rollout(horizon=5, n_envs=4)
+buffer.add(observation, action, reward, actual_next_observation, terminated, truncated,
+           value=collected_value, log_prob=collected_log_prob)
+# 위 add를 정책 파라미터 변경 없이 5번 호출한다.
+rollout = buffer.get()
+learner = L.A2C(model, optimizer, T.RolloutReturn(.99),
+                U.ActorCritic(value_coef=.5, entropy_coef=.01))
+result = learner.learn(rollout)
+buffer.clear()
+```
+
+긴 이름은 `RolloutBuffer`, `RolloutReturnGenerator`, `A2CLearner`이며
+`data.RolloutBatch`를 사용한다. Replay/SequenceReplay 및 기존 Learner의 API는 그대로다.
+
+|필드|RolloutBatch shape / dtype|
+|---|---|
+|observation / next_observation|`(T,N,*obs_shape)`, 원래 numeric dtype|
+|action|`(T,N)`, integer; Learner가 long으로 정규화|
+|reward|`(T,N)`, floating|
+|terminated / truncated|`(T,N)`, bool, 독립 보존|
+|value / log_prob|`(T,N)`, 수집 시점 floating Snapshot, 필수|
+
+Buffer는 detached owned CPU 복사본을 저장하고 순서·shape·dtype을 확인한다. 경계가 아닌 환경은
+이전 next_observation과 다음 observation이 이어져야 한다. 경계에서는 Reset 관측으로 넘어갈 수 있다.
+get은 정확히 horizon개 vector step을 stack하고 독립 결과를 반환한다. 자동 clear·무작위 sample·
+오래된 경험 덮어쓰기는 없다. len은 vector step 수이며 개별 환경 전이 수는 len*N이다.
+`RolloutBatch.to(device, dtype=...)`는 floating 필드만 변환하고 integer/bool을 보존한다.
+Buffer나 Batch는 Return·환경·Optimizer를 소유하지 않는다.
+
+`T.RolloutReturn(gamma).generate(reward, next_value, terminated, truncated)`의 모든 입력과 출력은
+동일한 `(T,N)` shape/device다. reward/next_value는 같은 floating dtype, 두 Mask는 bool이다.
+next_value는 각 전이의 **실제** 다음 관측 V다. Generator는 역순으로 Return을 계산한다:
+계속되는 구간은 다음 Return, truncated-only는 해당 final V, 자연 종료는 0으로 Bootstrap한다.
+마지막 계속 구간은 next_value[-1]을 사용한다. Truncation 후 새 Episode의 보상은 연결하지 않는다.
+Generator 자체는 graph를 보존하며 no_grad/detach는 Learner 책임이다.
+
+`L.A2C(model, optimizer, target_generator, update_rule).learn(rollout)`은 T*N을 flatten하여
+Categorical Policy와 scalar V를 재평가하고, eval/no_grad의 next V로 Return을 고정한다.
+기존 U.ActorCritic의 mean Loss와 단일 zero_grad/backward/step을 사용한다.
+반환 `ActorCriticOutput`의 네 지표는 detached scalar, signed `td_error=return-current_value`는
+detached `(T,N)`이며 Model dtype/device를 따른다. 기존 Rule의 `(B,)` 출력과 B=1 AC 반환은 바꾸지 않는다.
+
+수집 도중·수집 이후 첫 learn 전까지 파라미터를 고정하고 Rollout을 한 번만 학습한다.
+Learner는 현재 V/log_prob과 수집 Snapshot을 rtol=1e-5, atol=1e-6으로 비교해 관측 가능한 변경을
+거절한다. 이는 모든 파라미터 변경이나 데이터 출처를 인증하는 장치가 아니다. 호출자는 정책 최신성을
+보장해야 한다. Dropout/BatchNorm에는 일관된 eval Forward를 권장한다(eval에서도 gradient는 계산된다).
+저장 log_prob과 value는 Loss의 gradient 원천이 아니다.
+
+### SAME_STEP 수집 경계
+
+`environment.validate_vector_env(env)`를 수집 전에 호출한다. 동일한 Box 관측·0-based Discrete
+행동과 SAME_STEP만 지원하고 NEXT_STEP/DISABLED는 거절한다. Gymnasium >=1.1이 필요하며
+1.4.0에서 검증했다. 환경 constructor는 workers 간 동일 space를 검사한다.
+
+`environment.final_observations(returned, terminated, truncated, info)`는 실제 다음 관측 배열의
+복사본을 만든다. 경계에는 올바른 `final_obs`/`_final_obs`가 필수이며 누락 시 Reset 관측으로 대체하지
+않고 실패한다. returned는 다음 행동에, helper 결과는 Buffer에 전달한다. Buffer는 info를 해석하지 않는다.
+이는 [Gymnasium SAME_STEP 계약](https://farama.org/Vector-Autoreset-Mode)을 따른다.
+
+수집자는 기본 copy=True를 유지하거나 env.step 전에 이전 관측을 별도로 복사해야 한다.
+copy=False의 공유 관측이 이미 덮어써진 뒤 Buffer에 넣으면 이전 상태를 복구할 수 없다.
+환경은 수집자가 try/finally로 닫는다. Worker 예외 시 `env.close(terminate=True)`로 살아 있는
+Worker도 종료한 뒤 예외를 다시 발생시킨다. Async 환경 실행과 A2C의 동기식 업데이트를 구분한다.
+Model/Optimizer와 환경·Torch RNG, 수집 진행 상태가 checkpoint의 책임이며 Rollout만으로
+학습을 재개하지 않는다. GAE/PPO·연속 행동·Recurrent state·부분 Rollout·NEXT_STEP은 아직 없다.
