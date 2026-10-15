@@ -3,16 +3,18 @@
 > 현재 공개 API는 [API.md](API.md)를 따른다. 아래 개발 단계별 조합 검증에서
 > “examples 전용/새 Learner 없음”은 당시 범위다. Expected SARSA, Double Q,
 > n-step SARSA, Off-policy n-step SARSA, Tree Backup, Q(σ)의 학습 계산은 현재 패키지로
-> 승격됐으며 이전 함수는 호환 위임 경로다. 수학과 수집·업데이트 순서는 유지한다.
+> 승격됐으며 이전 함수는 호환 위임 경로다. Dyna World Model/Planner, Double DQN과
+> 1-step Actor-Critic도 현재 라이브러리 API다. 과거 검증 절은 당시 기록이며 현재 계약은
+> 아래 최신 절과 API.md를 따른다. 수학과 수집·업데이트 순서는 유지한다.
 
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
 ReplayBuffer/SequenceReplayBuffer·TD(0)/MC/n-step TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·TabularSARSALearner·DQNLearner와
 Tabular DP, On/Off-policy Monte Carlo Prediction/Control 및 TD(0) Prediction 참조 구현이다.
 Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole, DP/MC/TD Prediction 비교는
-Sutton Gridworld, On/Off-policy MC Control은 교재 3×4 Gridworld에서 실행할 수 있다. Runner, Agent,
-범용 Off-policy SARSA Learner, 다른 Neural Learner, 라이브러리 수준 WorldModel/Planner는 아직 포함되지 않는다.
-Expected SARSA·Double Q·Online multi-step·Dyna는 예제 조합 지원이며, 신규 Gymnasium Notebook과
+Sutton Gridworld, On/Off-policy MC Control은 교재 3×4 Gridworld에서 실행할 수 있다.
+Runner/Agent, 연속 관측 Learned World Model, SAC/PPO는 아직 포함되지 않는다.
+Expected SARSA·Double Q·Online multi-step·Dyna·Double DQN·1-step Actor-Critic은 라이브러리 API다. 신규 Gymnasium Notebook과
 Sequence Replay/DQN n-step 경로의 현재 계약은 문서 마지막 절과 GYMNASIUM_TUTORIALS.md에 정리한다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
@@ -3195,7 +3197,7 @@ SARSA windows preserve selected-action timing and flush order. Tree Backup and
 Q(sigma) additionally need intermediate Q/policy/sigma/importance data; this
 reward-only generator does not automatically implement those algorithms.
 
-### Gymnasium tutorials and supported scope
+### Gymnasium tutorials and supported scope — 당시 Phase 1 기록
 
 `notebooks/gymnasium/00` through `16` independently construct components and call
 Gymnasium reset/step in visible loops. Default mode is FULL; set
@@ -3246,7 +3248,7 @@ existing-notebook run itself reported 2,087 passed / 145 skipped in 3,100.31s;
 B=1 parameter cases added after its collection are covered by the final Core
 rerun. Exact commands and scope accounting are in GYMNASIUM_TUTORIALS.md.
 
-## 공개 API 간소화와 Learner 승격
+## 공개 API 간소화와 Learner 승격 — 32634ce까지의 기록
 
 representations/estimators/selectors/buffers/targets/updates/learners는 실제 공개 모듈이다.
 짧은 이름은 기존 클래스를 그대로 re-export한다. 루트에는 Model을 공개하고 같은 이름의
@@ -3278,3 +3280,75 @@ DQN은 기존 TD0 + keyword n_step_target_generator 계약에 더해 네 번째 
 optimize/sync_target 및 Online/Target/Optimizer의 공유·Gradient 경계는 바꾸지 않는다.
 Dyna의 Real n-step과 Planning 1-step은 같은 Learner를 재사용한다. WorldModel/Planner와
 환경·학습 스케줄은 examples에 남기며 새로운 범용 Learner/Factory/Runner를 만들지 않는다.
+
+## Dyna Planning, Double DQN과 1-step Actor-Critic — 현재 계약
+
+### World Model / Planner 경계
+
+`Model`은 정책·가치 추론이고 `W.Tabular`는 실제로 관측한 정수 `(s,a)`의 최신 결정적 환경 전이다.
+이전 examples의 TabularWorldModel 코드를 동일한 수식·state_dict 구조로 라이브러리에 옮겼다.
+보상 snapshot은 원래 floating dtype의 detached CPU Tensor이고, 자연 종료는 보존한다.
+외부 TimeLimit truncation과 Behavior log_prob은 동역학으로 학습하지 않는다. 미관측 pair에
+일반화하지 않는다. 같은 pair 덮어쓰기는 삽입 순서를 바꾸지 않으며 그 순서도 checkpoint 상태다.
+
+`P.Dyna(world, learner, *, batch_size=1, seed=None, rng=None)`는 World에서 `sample(rng)`로
+Transition을 받고 B개의 owned prediction을 쌓아 기존 `learner.learn(TransitionBatch)`를 호출한다.
+World의 len/sample, Learner의 learn이라는 경계만 요구하며 새로운 Base Class는 없다.
+추후 Neural World Model도 이 경계로 예측할 수 있지만 현재 구현된 것은 Tabular뿐이다.
+
+Planning budget은 실제 learn 호출 수다. Tabular 기본 B=1은 가상 전이 하나당 Q 갱신 하나이고,
+DQN의 B개 복원 추출은 Gradient Update 하나다. `plan(steps, record_batches=False)`는
+requested_updates/updates/results/batches dict를 반환한다. 결과는 원래 Learner 결과이며 빈 World와
+0 budget은 RNG와 학습 상태를 바꾸지 않는다. Planning은 환경·Replay·행동·epsilon·observe·Target
+Sync를 다루지 않는다. Real/Planning은 같은 Learner의 table 또는 Online/Target/Optimizer를 공유한다.
+Real n-step과 가상 1-step은 독립 Horizon이다. Sync 일정은 여전히 실제 환경 step에 둔다.
+World/Model/Optimizer와 Planning RNG, Replay RNG, 행동·환경 RNG 및 외부 스케줄을 별도로 저장한다.
+기존 예제의 import/plan 함수는 동일 반환값을 갖는 호환 위임 경로이고 설치 패키지는 examples를
+import하지 않는다. tests/_legacy_planning.py는 32634ce의 독립 비교 기준이다.
+
+### Double DQN의 유일한 계산 차이
+
+기본 DQN의 `_bootstrap`은 기존 순서 그대로 target.eval → target forward → max다.
+`DoubleDQNLearner(DQNLearner)`는 이 작은 Bootstrap 메서드만 바꾸고 기존 learn의 gather,
+TD0/NStep, 마지막 유효 next_observation, optimize와 sync_target을 재사용한다.
+Online argmax → Target gather를 no_grad에서 계산한다. Online=[1,4], Target=[10,2]이면 DQN은
+10, Double DQN은 2를 선택한다. Target Parameter/Buffer는 학습 중 바뀌지 않는다.
+
+Online Bootstrap은 임시 eval로 BatchNorm 통계 변경과 Dropout RNG 소비를 막고, 예외가 나도
+호출자의 모든 하위 모듈 모드를 복원한다. 현재 observation prediction은 원래 train/eval 모드를
+사용한다. Target은 계속 동결/eval이다. mode 복원을 위한 짧은 private context manager만 추가했으며
+알고리즘 Flag로 분기하는 공통 거대 Learner나 Base Class는 만들지 않았다. Model/Estimator/Buffer/
+TargetGenerator/기존 UpdateRule의 API와 기본 DQN의 1-step 연산 순서는 유지한다.
+
+### Actor-Critic의 수식과 소유권
+
+`L.ActorCritic(model, optimizer, T.TD0(gamma), U.ActorCritic(value_coef, entropy_coef))`는
+공유 Representation과 Categorical Policy/Scalar V를 조합한다. 최초 지원은 실제 step 직후
+새로운 B=1 TransitionBatch를 학습하는 On-policy TD(0) Actor-Critic이다. B>1은 거절하고 환경,
+Replay, Target Network와 행동 선택을 소유하지 않는다. 데이터가 최신 정책에서 수집됐는지는
+Batch만으로 보장할 수 없으므로 수집자는 act → step → learn 순서를 유지해야 한다.
+
+현재 Model.forward에서 선택 action의 log_prob과 V를 다시 계산한다. 저장된 detached log_prob은
+Policy Gradient에 사용하지 않는다. 다음 V와 TD0 target은 임시 eval/no_grad에서 평가한다.
+자연 종료는 Bootstrap을 중단하고 truncated-only는 실제 마지막 관측에서 Bootstrap한다.
+
+`ActorCriticUpdateRule.compute(log_prob, value, target, entropy)`는 같은 shape/dtype/device의
+floating `(B,)` Tensor에서 다음 계산만 한다.
+
+```text
+delta       = target - value
+actor_loss  = mean(-log_prob * delta.detach())
+critic_loss = mean(0.5 * delta**2)
+entropy     = mean(entropy)
+total_loss  = actor_loss + value_coef * critic_loss - entropy_coef * entropy
+```
+
+Actor Advantage만 detach하며 Critic/Target graph는 Rule 호출자가 관리한다. Learner는 고정 TD0
+Target을 공급하고 한 Optimizer로 zero_grad/backward/step한다. Actor와 Critic의 Gradient가 공유
+Representation으로 전달된다. `ActorCriticOutput`은 scalar actor_loss/critic_loss/entropy/total_loss와
+signed td_error `(B,)`를 담는 frozen dataclass다. dtype/device는 입력을 따르고 Rule은 graph를
+유지한다. Learner가 반환하는 모든 항목은 업데이트 직전 값을 detach한다.
+
+Model·Optimizer state_dict와 수집 RNG가 재개 상태다. 예제는 Dropout/BatchNorm 없는 MLP를
+쓰며, 사용자 상태적/확률적 Network의 행동 수집·재평가 일치는 호출자 책임이다.
+연속 행동 AC, A2C/A3C, PPO, GAE와 일반 Rollout Framework는 이번에 추가하지 않는다.

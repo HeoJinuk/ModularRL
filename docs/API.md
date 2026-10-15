@@ -1,6 +1,6 @@
 # 공개 API와 Learner 계약
 
-`R/E/S/B/T/U/L`은 사용자가 선택하는 import 별칭이다. 공개 모듈 이름은 복수형이며,
+`R/E/S/B/T/U/L/W/P`은 사용자가 선택하는 import 별칭이다. 공개 모듈 이름은 복수형이며,
 짧은 이름은 기존 클래스 자체를 가리킨다. 이름 변경용 상속이나 Wrapper는 없다.
 
 ```python
@@ -18,7 +18,7 @@ error = learner.learn(replay.sample(1))
 
 `import modular_rl.estimators as E`도 같다. `S`를 Selector 모듈에 쓰는 코드에서는 상태 수를
 `N_STATES`처럼 구분한다. 기존 내부 경로와 긴 이름을 계속 사용할 수 있으며,
-`S.EpsilonGreedy is EpsilonGreedyActionSelector`다. 원래 클래스의 `__name__`, `__module__`,
+`S.EpsilonGreedy is EpsilonGreedyActionSelector`다. 기존 라이브러리 클래스의 `__name__`, `__module__`,
 Parameter/Buffer 등록, state_dict key, Pickle 경로와 RNG 사용은 바뀌지 않는다.
 Model의 생성자, forward/act/evaluate_q/encode와 데이터 출력 필드도 유지한다.
 
@@ -31,7 +31,9 @@ Model의 생성자, forward/act/evaluate_q/encode와 데이터 출력 필드도 
 |selectors|Greedy, EpsilonGreedy, Categorical|
 |buffers|Replay, SequenceReplay|
 |targets|TD0, NStep, MCReturn|
-|updates|TabularV, TabularQ, TDLoss|
+|updates|TabularV, TabularQ, TDLoss, ActorCritic|
+|world_models|Tabular|
+|planners|Dyna|
 
 Estimator는 추정 결과를 출력한다. Selector는 그 결과에서 행동을 선택하고 sampling-time
 log_prob을 반환한다. `probabilities(estimate)`는 행동을 샘플링하거나 RNG를 소비하지 않는다.
@@ -58,7 +60,8 @@ Learner가 맡는다. UpdateRule은 테이블 갱신 또는 Loss 계산을 담�
 |MCControl|model, return_generator, visit_mode="first"; learn(episode)|Returns `(T,)`|
 |OffPolicyMCPrediction|model, return_generator, target_policy, method="weighted", visit_mode="first"; learn(episode)|Returns `(T,)`|
 |OffPolicyMCControl|model, return_generator; learn(episode)|Returns `(T,)`|
-|DQN|online, target_model, optimizer, target_generator, rule; learn(batch or sequence)|detached TDLossOutput|
+|DQN / DoubleDQN|online, target_model, optimizer, target_generator, rule; learn(batch or sequence)|detached TDLossOutput|
+|ActorCritic|model, optimizer, target_generator, rule; learn(fresh B=1 batch)|detached ActorCriticOutput|
 
 QLearning/SARSA/ExpectedSARSA/DoubleQ와 네 Window Learner는 E.TabularQ Model을 사용한다.
 TD0Prediction/MCPrediction/OffPolicyMCPrediction은 E.TabularV, MCControl/OffPolicyMCControl은
@@ -129,8 +132,94 @@ DQN의 네 번째 인자로 TD0와 NStep을 모두 허용한다. NStep을 주면
 Real n-step과 Planning 1-step은 같은 Learner/Online/Target/Optimizer를 공유할 수 있다.
 Target Sync 주기는 외부 환경 Step 기준 스케줄이다.
 
-여섯 승격 알고리즘은 설치한 `modular_rl`만으로 계산할 수 있다. 기존 examples의 learn 함수는
-호환 위임 함수이며, 수학의 독립 참조는 tests/_legacy_td에 dc2ecdc 기준으로 보존한다.
-Dyna의 TabularWorldModel/plan과 실험 루프는 계속 examples 지원이다. WorldModel/Planner의
-공용 API, Runner/Agent, Prioritized Replay, Neural SARSA/Actor-Critic/SAC Learner는 아직 없다.
-새 이름을 위해 기존 계산이나 Experiment 예산을 변경하지 않는다.
+학습·Planning 계산은 설치한 `modular_rl`만으로 실행한다. 기존 examples의 learn/plan 함수와
+TabularWorldModel import는 호환 경로로 유지한다. World Model의 state_dict 필드와 pair 순서는
+기존과 같고, 새 Pickle의 클래스 경로는 라이브러리 경로다. 예전 examples 경로의 객체 Pickle은
+그 예제가 있는 checkout에서만 호환된다. 이식 가능한 저장은 state_dict를 사용한다.
+수학의 독립 참조는 tests/_legacy_td(dc2ecdc), tests/_legacy_planning.py(32634ce)에 보존한다.
+Runner/Agent, Prioritized Replay, 연속 관측 Learned World Model, Neural SARSA/SAC는 아직 없다.
+
+## World Model과 Dyna Planner
+
+```python
+from modular_rl import world_models as W, planners as P
+from modular_rl.data import Transition
+
+world = W.Tabular()
+world.observe(Transition(0, 1, 1., 2, False, True))
+planner = P.Dyna(world, learner, batch_size=1, seed=7)
+result = planner.plan(steps=5)
+# result: requested_updates, updates, results, batches
+```
+
+`W.Tabular`는 `component.world_model.TabularWorldModel`의 alias다. 관측 `(state,action)`별
+최신 결정적 전이를 owned CPU snapshot으로 저장한다. 정수 상태·행동 ID, floating scalar reward와
+실제 자연 종료를 보존한다. 외부 truncation과 behavior log_prob은 예측하지 않는다. 미관측 pair를
+예측하지 않으며 반복 관측은 기존 pair의 삽입 순서를 유지한 채 덮어쓴다. `sample(rng)`은 관측
+pair를 균등 샘플링한다. `reset`, `len`, `state_dict`, `load_state_dict`가 기존 계약을 유지한다.
+
+`P.Dyna`는 `component.planner.DynaPlanner`의 alias다. 생성자는
+`(world_model, learner, *, batch_size=1, seed=None, rng=None)`이다. seed와 외부 NumPy Generator
+rng 중 하나를 사용한다. World 경계는 `len(world)`와 `sample(rng)->Transition`, Learner 경계는
+`learn(TransitionBatch)`다. 정식 Base Class나 Factory는 추가하지 않는다.
+
+`plan(steps=1, *, record_batches=False)`의 `updates`는 실제 learn 호출 수다. 기본 B=1은 가상
+전이당 한 번의 Tabular Q 갱신이고, DQN의 B개 복원 추출은 한 번의 Gradient Update다. `results`는
+Learner의 반환값을 순서대로 보존한다. `batches`는 명시적 QA 옵션에서만 기록한다. 빈 World나
+steps=0이면 학습과 RNG 소비가 없다. 환경 step/observe/Replay/행동 선택/ε 변경/Target Sync를
+수행하지 않는다. Real과 Planning에 같은 Learner를 전달한다. Target Sync는 계속 외부 스케줄이다.
+World/Model/Optimizer, planner.rng.bit_generator.state와 수집 상태를 별도로 저장한다.
+현재 Tabular World Model은 연속 CartPole 관측을 예측하는 모델이 아니다.
+
+## Double DQN
+
+```python
+learner = L.DoubleDQN(online, target_model, optimizer, T.TD0(.99), U.TDLoss())
+learner.sync_target()
+result = learner.learn(batch)
+# T.NStep(.99) + SequenceBatch도 동일 생성자/learn 경로를 사용한다.
+```
+
+긴 이름은 `learner.DoubleDQNLearner`다. DQNLearner를 상속해 optimizer, optimize, sync_target,
+입력 검증, n-step 보상 계산과 마지막 유효 관측 선택을 재사용한다. 차이는 Bootstrap뿐이다.
+Online argmax로 행동을 선택하고 Target의 해당 Q를 gather한다. Online=[1,4], Target=[10,2]면
+DQN은 10, Double DQN은 2를 사용한다. 두 평가는 no_grad이고 Target은 동결/eval이다.
+Online Bootstrap은 임시 eval로 BatchNorm 통계와 Dropout RNG를 보존한 뒤 모든 하위 모듈의
+원래 모드를 복원한다. 현재 상태 prediction은 호출자의 모드를 따른다. 기본 DQN의 연산 순서와
+Target max 경로는 유지한다. 복수 Critic/Distributional Q는 임의로 선택하지 않고 실패한다.
+이것은 Double DQN이며 Dueling Network를 뜻하지 않는다.
+
+## 1-step Actor-Critic
+
+```python
+model = Model(R.MLP(4, hidden_dims=(64,)),
+              E.ActorCritic(E.CategoricalPolicy(64, 2), E.StateValue(64)), S.Categorical())
+optimizer = torch.optim.Adam(model.parameters(), lr=.001)
+learner = L.ActorCritic(model, optimizer, T.TD0(.99),
+                        U.ActorCritic(value_coef=.5, entropy_coef=.01))
+selected = model.act(observation)
+# env.step(selected.action.item())의 실제 결과로 Transition을 만든 직후:
+result = learner.learn(transition.to_batch())
+```
+
+긴 이름은 `ActorCriticLearner`, `ActorCriticUpdateRule`이며 기존 긴 경로로도 import한다.
+첫 공식 범위는 Categorical 이산 Policy와 Scalar V, **새로 수집한 B=1의 즉시 On-policy 갱신**이다.
+B>1은 거절한다. Batch만으로 정책의 최신성을 검사할 수 없으므로 Replay 재사용 금지는 호출자
+책임이다. 정책·가치·공유 Representation에는 같은 Optimizer를 사용한다. Learner는 환경·Replay나
+Target Network를 소유하지 않는다. 실제 최종 관측의 V에서 no_grad TD0 target을 만들고 자연 종료만
+Bootstrap을 막는다. 다음 상태 평가는 임시 eval 후 모드를 복원한다. 현재 상태 forward는 호출자
+모드를 사용한다. 상태를 바꾸는/확률적인 사용자 Network는 행동 수집과 재평가의 정책 일치를
+호출자가 보장해야 한다. 예제는 Dropout/BatchNorm 없는 MLP를 사용한다.
+
+UpdateRule의 공개 메서드는 `compute(log_prob, value, target, entropy)`다. 모두 같은 비어 있지
+않은 floating `(B,)` Tensor이며 shape/dtype/device를 검사해 Broadcasting을 막는다.
+`delta=target-value`, `actor_loss=mean(-log_prob*delta.detach())`,
+`critic_loss=mean(.5*delta**2)`, `total_loss=actor_loss+value_coef*critic_loss-entropy_coef*mean(entropy)`다.
+계수는 유한한 0 이상의 실수다. Rule 자체는 Critic/Target graph를 유지하며, Learner가 no_grad
+Target을 공급하고 zero_grad/backward/step한다. 수집 당시 detached log_prob을 학습에 직접 쓰지
+않고 현재 Categorical에서 선택한 행동의 log_prob을 재계산한다.
+
+`data.ActorCriticOutput`은 frozen dataclass다. actor_loss, critic_loss, entropy, total_loss는
+scalar Tensor이고 signed td_error는 `(B,)`다. dtype/device는 모델을 따른다. Rule 출력은 graph를
+유지하고 Learner 출력은 전부 detach된 업데이트 직전 지표다. Model과 Optimizer state_dict,
+행동·환경 RNG를 함께 복원한다. 연속 행동, A2C/A3C, PPO, GAE는 이번 범위에 포함하지 않는다.

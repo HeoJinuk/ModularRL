@@ -179,6 +179,26 @@ for cls in (L.ExpectedSARSA,L.NStepSARSA,L.OffPolicyNStepSARSA,L.TreeBackup,L.QS
 learner=L.DoubleQ(model(),model(),T.TD0(.9),U.TabularQ(.5),action_selector=S.EpsilonGreedy(.1))
 learner.act(0);learner.learn(batch,update_first=True)
 assert learner.model1.estimator.q_table[0,0].item()==.5
+
+# New planning and neural APIs also work with examples deliberately unavailable.
+from copy import deepcopy
+from modular_rl import world_models as W, planners as P
+world=W.Tabular();world.observe(Transition(0,0,1.,1,True,True))
+q=Model(R.Identity(),E.TabularQ(4,2))
+planning=P.Dyna(world,L.QLearning(q,T.TD0(.9),U.TabularQ(.5)),seed=7)
+assert planning.plan(2)['updates']==2 and q.estimator.q_table[0,0].item()==.75
+world2=W.Tabular();world2.load_state_dict(world.state_dict())
+assert len(world2)==1 and not world2.sample(planning.rng).truncated
+online=Model(R.MLP(2,(4,)),E.DiscreteQ(4,2))
+double=L.DoubleDQN(online,deepcopy(online),torch.optim.Adam(online.parameters()),T.NStep(.9),U.TDLoss())
+double.sync_target()
+neural_batch=Transition(torch.tensor([1.,2.]),0,1.,torch.tensor([2.,3.]),False,True).to_batch()
+result=double.learn(neural_batch)
+assert result.loss.shape==() and not result.loss.requires_grad
+ac_model=Model(R.MLP(2,(4,)),E.ActorCritic(E.CategoricalPolicy(4,2),E.StateValue(4)),S.Categorical())
+ac=L.ActorCritic(ac_model,torch.optim.Adam(ac_model.parameters()),T.TD0(.9),U.ActorCritic())
+result=ac.learn(neural_batch)
+assert result.td_error.shape==(1,) and not result.total_loss.requires_grad
 '''
     result=subprocess.run([sys.executable,'-I','-c',code,str(package)],cwd=tmp_path,capture_output=True,text=True)
     assert result.returncode==0,result.stdout+result.stderr

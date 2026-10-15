@@ -48,6 +48,8 @@ N_STATES/N_ACTIONS로 구분해 Selector 모듈 S와 충돌하지 않게 한다.
 |14_dyna_dqn|FrozenLake|정수 ID와 One-hot MLP; Planning에도 같은 DQN/Optimizer|
 |15_dqn|CartPole|1-step Replay, 명시적인 Warm-up·Epsilon·Target 스케줄|
 |16_n_step_dqn|CartPole|SequenceReplay -> NStepTargetGenerator -> DQNLearner.learn|
+|17_double_dqn|CartPole|DQN/Double DQN의 환경 step·Gradient Update·Sync 예산 통제|
+|18_actor_critic|CartPole|Categorical Policy/Scalar V, B=1 즉시 On-policy 학습|
 
 FrozenLake는 `map_name="4x4", is_slippery=False`다. 행동 ID는 Left/Down/Right/Up이다.
 알려진 P는 DP와 참조값 진단에만 사용하며, Dyna 모델에는 관측한 전이만 기록한다.
@@ -57,7 +59,9 @@ CartPole은 Floating Observation과 Scalar Discrete Action을 사용한다.
 DP, MC/TD Prediction·Control, Q-learning, SARSA, DQN, Expected SARSA, Double Q,
 Online n-step SARSA, Off-policy n-step SARSA, Tree Backup, Q(σ)는 라이브러리 API다.
 이들의 학습 계산은 Notebook에서 공식 Learner를 구성해 호출한다. Dyna의
-TabularWorldModel/plan과 실험 수집·스케줄은 **examples 지원**이다. Return 수식은 복사하지 않는다. Tree Backup/Q(σ)는 여기서 고정 정책의
+World Model/Planner도 `W.Tabular`/`P.Dyna`의 설치형 API다. Double DQN과 1-step Actor-Critic도
+공식 Learner다. 실험 수집·스케줄은 외부 루프에 둔다. Return 수식은 복사하지 않는다.
+Tree Backup/Q(σ)는 여기서 고정 정책의
 평가다. Q(σ)는 교재 본문 식 (7.17)의 경계 정의를 따르며 의사코드와의 차이를 기록한다.
 공식 정오표에서 인정된 오류라고 단정하지 않는다.
 
@@ -257,3 +261,77 @@ Q-learning은 Step마다 Replay에서 하나를 샘플링하고 나머지 세 Ta
 최종 전체 회귀: `python -m pytest -q` — **2,171 passed / 149 skipped**, 55분 7초.
 149개는 CUDA 미사용 환경의 Device 검사다. DLFS4 04–08 다섯 개와 Gymnasium 17개를
 각각 같은 Kernel에서 두 번 실행한 결과를 포함한다. 기존 예제 18개 Smoke Test도 통과했다.
+
+## Planning / Double DQN / Actor-Critic 전환
+
+13/14는 examples import 없이 `W.Tabular()`와 `P.Dyna(...)`를 직접 구성한다.
+13의 B=1은 가상 전이당 Q 갱신 하나이고 14의 B개 복원 추출은 DQN Gradient Update 하나다.
+Planning이 Real Replay·환경 step·Target Sync 일정을 바꾸지 않는다. World는 정수 관측 기반이므로
+14는 FrozenLake Dyna-DQN이며 연속 관측 CartPole Dyna-DQN으로 해석하지 않는다.
+
+17은 Seed 7, MLP(128,128), Adam(1e-4), gamma=.99, Replay 10000, SmoothL1을 사용한다.
+FULL에서는 DQN과 Double DQN 각각 **실제 환경 40000 step / 39001 Gradient Update / 160 Sync**,
+Warm-up 1000, Batch 64, Sync 주기 250이다. 평가용 환경과 20 Episode의 Seed 집합도 같다.
+행동이 다르므로 경험 자체가 같다는 뜻은 아니다. 같은 예산 안에서 완료한 Episode 수는 달라진다.
+FAST는 각 400 step, Warm-up 32, Batch 16이다. n-step Double DQN의 수학은 SequenceBatch
+단위 테스트로 검증하며 Notebook에 보상합이나 Bootstrap을 재구현하지 않는다.
+
+18은 공유 Tanh MLP(64), 단일 Adam(.001), gamma=.99, value_coef=.5, entropy_coef=.01이다.
+FULL 80000 step, FAST 400 step의 각 경험을 B=1로 즉시 한 번 사용한다. 정책·가치 Loss와
+Entropy·TD Error, 학습 전후 별도 Greedy Return을 표시한다. Replay 재사용과 Target Network가
+없으므로 DQN과 비교할 때 환경 step뿐 아니라 학습 호출 수·Batch 크기·재사용도 구분한다.
+저장 log_prob은 학습에 직접 쓰지 않고 현재 Policy에서 재계산한다.
+
+기존 개발 단계별 수치와 당시 지원 범위는 위의 날짜별 검증 기록이다. 현재 API의 정확한 계약은
+[API.md](API.md)를 따른다. 새로운 Notebook도 같은 Kernel에서 처음부터 Run All하면 Model,
+Optimizer, 환경과 RNG를 초기화한다. 성능은 단일 Seed 관찰이며 확률적 성능을 pytest 합격 조건으로
+쓰지 않는다. 현재 지원 범위에 A2C/A3C/PPO/GAE나 연속 행동 AC를 포함하지 않는다.
+
+### 이번 FULL 실행 결과 (Seed 7)
+
+평가 환경은 학습 환경과 분리하고 동일한 초기 Seed 집합을 사용했다. CartPole 평가는 각각
+20 Episode다. 아래는 실제 실행 결과이며 확률적 학습 성능을 단위 테스트 합격 기준으로 삼지 않는다.
+
+|실험|환경 Step|학습 호출|Episode|평가 평균 Return 전 → 후|
+|---|---:|---:|---:|---:|
+|17: DQN 통제군|40000|39001|426|9.2 → 162.10|
+|17: Double DQN|40000|39001|395|9.2 → 197.45|
+|18: 1-step Actor-Critic|80000|80000|619|9.2 → 500.00|
+
+DQN 두 실행은 Target Sync 160회, Batch 64로 과거 데이터를 반복 사용했다. Actor-Critic은
+새로운 B=1 경험을 한 번씩만 사용했고 Target Network가 없다. Episode 예산·데이터 사용 방식이
+다르므로 세 수치로 일반적인 알고리즘 우열을 주장하지 않는다. 새 Notebook에는 FULL 출력을
+저장하고 13/14는 기존 FAST 학습 그래프를 유지한다. FAST 두 번 실행은 별도 수치·RNG 검사다.
+
+### Dyna와 기존 DQN의 수치 회귀
+
+Dyna 13/14는 작업 전 Notebook과 전환 후 Notebook을 독립 실행해 FAST의 기존 학습 수치,
+Model/RNG와 PNG가 일치했다. 학습 전 Greedy 평가만 추가했으며 학습 RNG는 바꾸지 않았다.
+동결한 32634ce World Model/Planning 수식으로 FULL도 별도 실행해 13/14의 학습 값·Model·RNG·PNG를
+대조했다. Optimizer와 Target Sync 일정의 동등성은 별도 결정적 학습 루프 테스트에서 검증한다.
+
+|FULL Dyna 실험|Episode|실제 Step|실제 학습|Planning 학습|Greedy 평가|
+|---|---:|---:|---:|---:|---|
+|13 Tabular Dyna-Q|1000|6832|6832|34160|0 → 100/100 성공|
+|14 FrozenLake Dyna-DQN|1000|7527|7464|7527|0 → 0/100 성공|
+
+14는 학습 중 558/1000 Episode에서 Goal에 도달했지만 마지막 Greedy Policy는 실패했다.
+이는 이동 전 동결 참조에서도 같은 결과다. API 동등성은 통과했으며 이 설정의 최종 정책 성능은
+미해결 제약으로 남긴다. 성능을 높이기 위해 이번 호환성 검증 중 Network/보상/학습 예산을 바꾸지 않았다.
+Dyna-DQN은 FrozenLake의 정수 상태 실험이며 CartPole Neural World Model 구현을 뜻하지 않는다.
+
+기존 15 DQN FULL은 400 Episode, 35232 step, 34233 업데이트와 평가 9.2 → 186.55를 재현했다.
+기존 검증 기록의 전체 정밀도 학습 값·Model state_dict·RNG도 동일했다.
+
+기존 16 n=3 DQN FULL도 400 Episode, 61342 step, 60343 업데이트와 평가 9.2 → 287.0을
+재현했다. 기존 FULL 15/16 모두 전체 정밀도 학습 수치·Model state_dict·RNG와 PNG가 동일했다.
+
+### 최종 검증
+
+`python -m pytest -q --basetemp=/private/tmp/modularrl-planning-full-tests`는
+**2245 passed / 165 skipped**, 4333.49초(72분 13초)로 완료됐다. 165개는 CUDA 미지원 검사다.
+Gymnasium 19개와 DLFS4 04–08의 5개 Notebook을 각각 같은 Kernel에서 Run All 두 번 실행한
+수치·출력·PNG 검증을 포함한다. 기존 예제 18개의 Smoke Test도 통과했다. 설치 wheel만 쓰고
+`examples`를 차단한 독립 Python 프로세스에서 기존 승격 API 및 W.Tabular/P.Dyna/DoubleDQN/
+ActorCritic의 실제 학습을 검증했다. Model/Estimator/Buffer/TargetGenerator 공개 계약은 유지했다.
+작업 전부터 있던 Notebook 수정과 미추적 연습·체크포인트 파일은 보존하고 커밋에서 제외했다.

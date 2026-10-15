@@ -1,13 +1,13 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer/SequenceReplayBuffer, TD/MC/n-step targets, TD UpdateRules, TabularQLearner, TabularSARSALearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner, Agent and other Neural Learners are not implemented as library APIs. Expected SARSA, Double Q, online n-step SARSA, off-policy n-step SARSA, Tree Backup and Q(σ) are public Learners. Dyna World Model/planning remain example compositions; see the API guide for exact support boundaries.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer/SequenceReplayBuffer, TD/MC/n-step targets, TD UpdateRules, TabularQLearner, TabularSARSALearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner and Agent are not implemented as library APIs. Double DQN and immediate one-step categorical Actor-Critic are public Neural Learners. Expected SARSA, Double Q, online n-step SARSA, off-policy n-step SARSA, Tree Backup and Q(σ) are public Learners. Dyna World Model/planning are installed library APIs; see the API guide for exact support boundaries.
 
 ## Gymnasium algorithm notebooks
 
-[17 independent tutorials](docs/GYMNASIUM_TUTORIALS.md) in
+[19 independent tutorials](docs/GYMNASIUM_TUTORIALS.md) in
 [`notebooks/gymnasium/`](notebooks/gymnasium/) show direct component construction,
 Gymnasium reset/step and visible learning loops: DP/MC/TD, Q-learning/SARSA,
-public multi-step Learners, Dyna compositions, CartPole DQN and n-step DQN.
+public multi-step Learners, Dyna planning, CartPole DQN/n-step DQN, Double DQN and one-step Actor-Critic.
 Default mode is FULL; `MODULARRL_FAST=1` selects small API smoke budgets.
 Existing DLFS4 notebooks remain independent regression tutorials.
 
@@ -33,13 +33,48 @@ error = learner.learn(replay.sample(1))
 
 Short names alias the existing classes; old imports, constructors, Model methods,
 state_dict and Pickle paths remain supported. [API contracts](docs/API.md) list all
-14 Learners, ordered-window inputs, Double Q behavior selection, DQN's positional
-`T.NStep` support and the boundary between installed APIs and example-only Dyna helpers.
+16 Learners, ordered-window inputs, Double Q behavior selection, DQN's positional
+`T.NStep` support and the World Model/Planner APIs and their checkpoint boundaries.
 No Learner imports `examples` or loads external code with `runpy`.
 
 The older composition sections below retain the experiment rationale and legacy
 function calls. Their learning functions now delegate to the corresponding public
 Learners; collection loops and scheduling remain explicit in the examples.
+
+## Planning, Double DQN and Actor-Critic
+
+```python
+import torch
+from modular_rl import world_models as W, planners as P
+world = W.Tabular()                     # observed integer state/action pairs
+world.observe(transition)
+planner = P.Dyna(world, learner, batch_size=1, seed=7)
+planning = planner.plan(steps=5)         # five learn calls; no environment step
+
+# Reuse DQN's target synchronization, optimizer and optional n-step replay:
+double = L.DoubleDQN(online, target_model, optimizer, T.TD0(.99), U.TDLoss())
+double.sync_target()
+
+actor_critic = Model(R.MLP(4, hidden_dims=(64,)),
+    E.ActorCritic(E.CategoricalPolicy(64, 2), E.StateValue(64)), S.Categorical())
+ac_optimizer = torch.optim.Adam(actor_critic.parameters(), lr=.001)
+ac = L.ActorCritic(actor_critic, ac_optimizer, T.TD0(.99), U.ActorCritic(.5, .01))
+# Select -> env.step -> learn(fresh_transition.to_batch()) before the next action.
+```
+
+A planning step is a learner update, not an environment step. DQN planning uses
+`batch_size=B` synthetic samples with replacement and shares the real learner's
+Online/Target/Optimizer. Target sync remains an external schedule. The current
+World Model predicts latest observed deterministic **integer-state** transitions;
+FrozenLake Dyna-DQN is supported, continuous-observation CartPole Dyna-DQN is not.
+
+Double DQN selects next actions online and evaluates them with the target network.
+Actor-Critic recomputes policy log probabilities with gradients, detaches actor
+advantages, and supports fresh on-policy **B=1 immediate updates** only. It has no
+replay or target network. See [API contracts](docs/API.md) for outputs, modes and
+checkpoint ownership, and [notebooks 13/14/17/18](docs/GYMNASIUM_TUTORIALS.md) for
+explicit construction, training loops and measured results. A2C/A3C/PPO/GAE and
+continuous Actor-Critic remain future work.
 
 ## Layout
 
@@ -1036,9 +1071,9 @@ python -m examples.gridworld_dyna_q --steps 2000 --seeds 7 11 19
 python -m pytest -q tests/test_dyna_q_composition.py tests/test_gridworld_dyna_q.py
 ```
 
-The example-local `TabularWorldModel` predicts the latest observed outcome for
+`W.Tabular` (the existing `TabularWorldModel` example import remains compatible) predicts the latest observed outcome for
 each state/action pair. `plan(world_model, learner, steps=5, rng=planning_rng)`
-generates synthetic transitions and reuses **the existing TabularQLearner**;
+delegates to `P.Dyna` and reuses **the existing TabularQLearner**;
 it neither steps an environment nor chooses a behavior action. Planning samples
 uniformly over observed pairs using a separate NumPy Generator. Empty-model
 planning performs no updates. External truncation is not learned as termination.
@@ -1055,8 +1090,8 @@ planning, without additional actions or environment steps.
 
 [Notebook 07](notebooks/dlfs4/07_dyna_modularrl.ipynb) calls these example functions,
 compares three seeds with DP, and demonstrates offline model initialization and
-idle planning. Existing notebooks and all `modular_rl/` implementations remain
-unchanged. This is a deterministic tabular sample model; stochastic/continuous
+idle planning. That experiment predates the public World Model/Planner API; the
+legacy functions now delegate to the library without changing their results. This is a deterministic tabular sample model; stochastic/continuous
 world models and prioritized planning remain future work. Neural Q composition is
 validated separately below. Model, world
 model, RNGs, settings, pending real window and (for mid-episode resume) environment
@@ -1125,7 +1160,8 @@ DQN loop, including batches, targets, optimizer state and RNGs.
 Real n=3/5 uses example-only reward-sum/horizon metadata, with bootstrap evaluated
 by the **current target network when sampled**. Planning remains one-step. The
 small n-step function composes the same public target/loss/optimizer components;
-the existing DQN `learn` API accepts only one-step transitions. Boundary flushing
+current DQN `learn` also supports `SequenceBatch`; the legacy reward-sum metadata
+path remains compatible with the old example. Boundary flushing
 adds metadata records and does not override the configured gradient frequency.
 The final flushed records may await later replay learning.
 
