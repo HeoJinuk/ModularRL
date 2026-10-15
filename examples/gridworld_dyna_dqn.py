@@ -3,7 +3,7 @@
 import argparse
 from collections import deque
 from copy import deepcopy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from numbers import Integral
 from time import perf_counter
 
@@ -11,7 +11,8 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
-from examples.gridworld_dyna_q import TabularWorldModel
+from modular_rl.component.world_model import TabularWorldModel
+from modular_rl.component.planner import DynaPlanner, synthetic_batch
 from examples.gridworld_mc_control import evaluate_greedy
 from modular_rl.component.action_selector import EpsilonGreedyActionSelector
 from modular_rl.component.buffer import ReplayBuffer
@@ -50,21 +51,6 @@ def create_learner(*, n_states=11, n_actions=4, hidden_dims=(128, 128),
     return learner
 
 
-def synthetic_batch(world_model, *, batch_size, rng):
-    """B independent uniform observed-pair predictions WITH replacement.
-
-    One observed pair is sufficient even for B=32. State/action/flags have
-    shape (B,), observations remain integer IDs, log_prob is None. The world
-    supplies owned predictions; stacking produces an independent CPU batch.
-    """
-    _positive_integer(batch_size, "batch_size")
-    rows = [world_model.sample(rng).to_batch() for _ in range(batch_size)]
-    return TransitionBatch(**{
-        field.name: None if field.name == "log_prob" else torch.cat([getattr(row, field.name) for row in rows])
-        for field in fields(TransitionBatch)
-    })
-
-
 def plan(world_model, learner, *, steps, batch_size, rng, record_batches=False):
     """Run independent 1-step DQN minibatch updates through the SAME learner.
 
@@ -74,16 +60,8 @@ def plan(world_model, learner, *, steps, batch_size, rng, record_batches=False):
     RNG. The result distinguishes requested and actual optimizer steps and
     contains detached TDLossOutput metrics. Batch recording is optional QA data.
     """
-    _positive_integer(steps, "planning steps", minimum=0)
-    _positive_integer(batch_size, "batch_size")
-    results, batches = [], []
-    if len(world_model):
-        for _ in range(steps):
-            batch = synthetic_batch(world_model, batch_size=batch_size, rng=rng)
-            results.append(learner.learn(batch))
-            if record_batches:
-                batches.append(batch)
-    return {"requested_updates": steps, "updates": len(results), "results": results, "batches": batches}
+    return DynaPlanner(world_model, learner, batch_size=batch_size, rng=rng).plan(
+        steps, record_batches=record_batches)
 
 
 @dataclass(frozen=True, slots=True)
