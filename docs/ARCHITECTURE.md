@@ -2698,6 +2698,7 @@ Model/World Model만으로 보장할 수 없다.
   그대로 전달할 수는 없다. DQNLearner는 online_model과 TDLossOutput 계약을 가지므로 향후 작은
   Neural Planning 함수에서 같은 sample→to_batch→learn 흐름을 연결하고 td_error/loss를 수집해야 한다.
   이를 위해 공통 BaseLearner나 기존 Learner API 변경이 반드시 필요한 것은 아니다.
+  후속 Neural 조합 검증은 아래 `Dyna-DQN 컴포넌트 조합 검증` 절에서 이 최소 경로를 구현한다.
   기존 ReplayBuffer는 log_prob 유무를 한 Buffer 안에서 혼합하지 못한다. 실제 전이의 log b와
   가상 전이의 None을 유지하려면 source별 Buffer를 분리하고 Batch 조합/메타데이터 정책을
   외부에서 정해야 한다. 가상 log probability를 0으로 만들어 넣지 않는다.
@@ -2755,3 +2756,281 @@ RMSE가 0인 것은 아니다. Planning을 늘릴 때 탐색 경로가 바뀌어
 07은 20개 셀/코드 10개/그림 3개이며 새 그림을 시각적으로 확인했다.
 기존 04–06 세 파일은 셀·출력·metadata를 포함한 전체 byte hash가 작업 전과 같고,
 `modular_rl/`의 기존 Python 61개 파일도 byte hash와 파일 집합이 같다.
+
+## Dyna-DQN 컴포넌트 조합 검증
+
+### 실제 저장소 분석과 최소 조합
+
+기준 `2c3263b`의 `DQNLearner`는 외부 `TransitionBatch`를 직접 학습한다. Buffer를 소유하거나
+샘플링하지 않는다. 실제 구현은 `DiscreteQEstimator`, `TD0TargetGenerator`, `TDLossUpdateRule`이며
+DQNUpdateRule·DQN/DDQN 전용 TargetGenerator·Agent·Runner는 없다. 이름만 보고 존재를 가정하지 않는다.
+TDLoss 기본은 MSE이고 기존 CartPole 예제는 `SmoothL1Loss(reduction="none")`를 주입한다.
+이번 Neural 예제도 이 Huber 구성을 재사용한다.
+
+| 기존 DQN 검토 질문 | 확인 결과 |
+|---|---|
+| 외부 Batch 직접 학습? | `learn(batch)`가 가능하다. |
+| Replay Sampling이 내부에 고정? | 없다. 호출자가 임의 source의 Batch를 전달한다. |
+| Real/Planning 구분? | 서로 다른 호출 경로와 카운터로 구분하며 source 필드를 Transition에 추가하지 않는다. |
+| 같은 Online Network 공유? | 같은 DQNLearner 객체를 두 경로에 전달한다. |
+| 같은 Target 공유? | 같은 `target_model`을 no_grad/eval로 사용한다. |
+| Optimizer 상태 공유? | 동일 Adam 한 개가 두 source의 Gradient Step과 Moment를 누적한다. |
+| Target 동기화 시점? | Learner는 자동 주기를 갖지 않는다. 기존 CartPole처럼 예제의 실제 환경 Step 주기를 유지한다. |
+| Target/Loss/Optimizer 분리? | TD0/TDLoss는 독립 컴포넌트다. 기본 learn은 세 단계를 묶고 공개 외부 Target 경로는 없다. |
+| n-step 지원? | TD0는 한 단계 수식, TDLoss는 외부 Tensor를 받는다. n-step은 예제에서 보상합/Horizon을 조합한다. |
+| Replay source 구분? | 공개 source 필드가 없다. Real 전이만 한 Replay에 넣어 출처를 유지한다. |
+
+`modular_rl/`과 기존 Tabular Dyna/Q-learning 예제는 변경하지 않는다. 새로운 DynaDQNLearner,
+BaseLearner, Runner나 Registry는 없다. `examples/gridworld_dyna_dqn.py`의 작은 함수가 조합을 담당한다.
+
+```text
+Environment.step ── actual Transition ── Real Replay ── Real Batch ──┐
+                    └── world.observe                               │
+TabularWorldModel.sample ── Synthetic Batch ──────────────────────────┤
+                                                       same DQNLearner
+                                                       same Online Q
+                                                       same Optimizer/Moments
+                                                       same Target Q
+```
+
+### 공개 예제 함수와 데이터 흐름
+
+- `create_learner(..., gamma=.9, learning_rate=1e-4, dtype=float32, device="cpu")`는
+  기존 Model·MLPRepresentation·DiscreteQEstimator·EpsilonGreedy·TD0·TDLoss·Adam을 조합하고 초기 Target을 복사한다.
+- `synthetic_batch(world_model, batch_size, rng)`는 예측 전이를 묶은 기존 TransitionBatch를 반환한다.
+- `plan(world_model, learner, steps, batch_size, rng, record_batches=False)`는 환경과 독립적으로
+  같은 `learner.learn(batch)`를 반복한다. 반환 dict는 requested_updates, 실제 updates,
+  detached TDLossOutput results와 선택적인 QA용 batches를 구분한다.
+- `run_steps(env, learner, replay, ...)`는 고정 실제 Step 예산의 명시적인 수집·학습 루프다.
+  Real 전이 저장 → 설정된 Real 업데이트 → World 관측 → Planning → 경계 Metadata Flush → 필요한 Sync
+  순서를 따른다. 편의 실험 함수이며 범용 Runner나 live resume API가 아니다.
+- `make_n_step_experience(window, target_generator)`는 실제 시간순 B=1 Window의 보상합과 실제 Horizon을 만든다.
+- `learn_real_n_step(learner, experiences)`는 같은 Learner의 공개 학습 컴포넌트를 조합한다.
+- `train_and_evaluate(...)`, `comparison(steps=3000, seeds=(7,11,19))`는 독립 환경의 Greedy 평가와
+  DP 참조값·Loss·카운터·실제 실행시간을 보고한다.
+
+신경망 입력에는 기존 구현에 없던 One-hot 변환이 필요하다. 프레임워크 클래스를 추가하지 않고
+`nn.Sequential(nn.Embedding.from_pretrained(torch.eye(S), freeze=True), MLPRepresentation(...))`를
+기존 Representation 자리에 전달한다. 단위행렬은 학습되지 않고 Model.to와 state_dict를 따른다.
+InputAdapter는 정수 State ID를 long으로 유지하며, 이 Tensor→Tensor 경계에서만
+`(...) -> (..., S)` floating One-hot과 MLP Features로 변환한다. Q 출력은 `(..., A)`다.
+Replay에는 raw 정수 ID, World에는 Python 정수 ID를 유지한다. float32/64와 CPU/CUDA 계약은 테스트한다.
+현재 기본 Network는 Dropout 없는 128×128 ReLU MLP와 Linear Q Head다.
+고정 단위행렬 Lookup은 O(S²) 저장 공간을 쓰는 작은 Gridworld 예제의 선택이다.
+큰 이산 상태공간이나 연속 관측에는 다른 Representation이 필요하며 이 예제로 일반화 성능을 주장하지 않는다.
+
+### Real Replay와 모델 생성 Minibatch
+
+ReplayBuffer에는 실제 `env.step`의 Transition만 넣는다. 실제 log_prob은 수집 당시 값을 유지하며
+Synthetic의 None과 같은 Replay에 섞지 않는다. Raw ReplayBuffer.sample은 비복원 추출한다.
+Planning은 Replay를 읽지 않고 기존 TabularWorldModel의 최신 쌍별 예측에서 직접 Batch를 만든다.
+World는 관측된 `(s,a)` 쌍을 균등 추출하고 B번 독립 복원 추출하므로 한 쌍만 있어도 B=32 학습이 가능하다.
+빈 모델의 Planning은 0 업데이트이며 RNG를 소비하지 않는다. 가상 전이를 다시 observe하지 않는다.
+
+World는 자연 종료를 보존하며 외부 Time-limit을 환경 동역학으로 학습하지 않아 예측 truncated=False,
+log_prob=None이다. 결정적 Gridworld에서는 예측과 과거 경험이 같을 수 있지만, source는 분리돼 있다.
+이는 환경모델의 일반화·확률적 분포 추정 검증이 아니라 모델 생성 경험의 Neural 학습 경로 검증이다.
+같은 Pair를 새로 observe하면 최신 결과로 대체되는 기존 World의 API·테스트를 그대로 재사용한다.
+
+기본 설정은 Batch=32, Real Warm-up=64, Replay capacity=10,000, train_frequency=1,
+gradient_steps=1이다. Warm-up은 Real 경로에만 적용한다. 매 실제 Step의 World 관측 직후
+설정한 Planning Budget(0/1/5)만큼 Gradient Step을 추가한다. Requested/실제 Planning Step을 별도로 센다.
+Real min-size/Batch 조건이 안 되면 Real 업데이트만 건너뛰고 관측·Planning은 계속한다.
+
+### 공유 학습 상태, 수학 검증과 동기화
+
+Real과 Planning 모두 기존 DQN 식을 사용한다.
+
+```text
+prediction = Q_online(states).gather(actions)
+next_value = max_a Q_target(next_states, a)       # no_grad, eval
+target = TD0.generate(reward, next_value, terminated)
+result = TDLoss.compute(prediction, target)       # SmoothL1 unreduced -> mean
+optimizer.zero_grad(); result.loss.backward(); optimizer.step()
+```
+
+DQNLearner와 TDLoss의 기존 Gradient 계약을 유지한다. 반환 TD Error/Loss는 업데이트 직전 계산값을
+detach한 Tensor다. Target은 독립 저장 공간·동결·eval이며 Optimizer에 포함하지 않는다.
+Target 파라미터가 변하는 시점은 초기 복사와 명시적인 hard sync뿐이다. 온라인 train/eval은 호출자가 관리한다.
+별도 평가 환경에서 deterministic 행동을 선택해 탐색 RNG와 학습을 간섭하지 않는다.
+
+수치 검증은 Target Next Q=[4,6], Reward=1, gamma=.9에서 Y=6.4다. Online Next Q=[44,66]으로
+다르게 두어 Target Network를 쓰는지 확인한다. 자연 종료는 Y=3이며, truncated-only는 Y=6.4다.
+두 flag가 True이면 자연 종료가 우선한다. B=1/4/32, 중복/혼합 Pair, dtype/device를 검증한다.
+Prediction=2일 때 signed error=4.4, Huber=3.9다. SGD(lr=.1,momentum=.9)로 Real 업데이트 후
+Q=2.1, Momentum=-1이고, 같은 Optimizer의 Planning 후 Q=2.29, Momentum=-1.9, Loss=3.8이다.
+Tabular의 Q=4.2/5.3 갱신을 신경망에 적용하지 않는다. 실제 실험은 Adam을 사용한다.
+
+초기 `sync_target()` 1회는 periodic sync count와 구분한다. 기존 CartPole 예제처럼 실제 환경 Step의
+배수(기본 250)에서 Real·Planning 뒤 동기화한다. Planning=5라고 Sync가 5배 빨라지지 않는다.
+환경 Step 없는 Idle Planning에는 자동 Sync가 없다. 필요하면 외부에서 명시적으로 sync_target을 호출한다.
+환경·Real 전이·World 관측·Real/Planning/전체 Gradient Step·Periodic Sync 카운터를 각각 기록한다.
+
+Planning=0 회귀 테스트의 Reference Loop는 Dyna 실행 함수를 호출하지 않는 별도 DQN 루프다.
+Seed 7/11/19, float32/64에서 초기화·실제 행동/전이·Replay 내용/후속 샘플·모든 Target·TD Error/Loss·
+Online/Target 파라미터·Optimizer 전체 상태·Sync Count·환경/행동/Planning RNG를 정확히 비교한다.
+최종 Reward 유사성만 비교하지 않는다. Planning RNG는 독립 NumPy Generator이며 deterministic MLP의
+Planning은 Torch 행동 RNG를 소비하지 않는다. 확률적 Neural World/Dropout을 도입한다면 이 RNG 분리는
+다시 설계해야 한다. Planning으로 Q가 바뀌어 이후 행동이 바뀌는 현상은 RNG 독립성 위반이 아니다.
+
+### Real n-step과 Planning 1-step의 경계
+
+`NStepExperience`는 예제에만 있는 frozen dataclass다. owned CPU scalar인 시작 observation/action,
+discounted reward_sum, 마지막 next_observation/terminated/truncated와 실제 horizon m, gamma를 보존한다.
+보상합의 의미가 바뀌므로 다른 gamma로 기존 Metadata를 재사용하지 않는다. Bootstrap Q는 저장하지 않는다.
+원래 Transition과 TransitionBatch 공개 필드는 변경하지 않는다.
+
+기존 ReplayBuffer는 horizon·임의 Metadata·sample index 공개 API가 없다. Raw Replay는 실제 1-step 전이를
+유지하고 n>1에만 별도 `deque(maxlen=replay.capacity)`에 n-step 기록을 저장한다.
+이는 작은 예제 Metadata 저장소이며 범용 n-step Buffer 구현이 아니다. 별도 명시적인 NumPy RNG로
+기록을 비복원 추출한다. Pending Window에는 실제 경험만 넣고 첫 n-1 Step 중에도 World 관측과 Planning은 진행한다.
+
+```text
+reward_sum = R1 + gamma*R2 + ... + gamma**(m-1)*Rm
+next_value = max_a Q_current_target(last_next_state, a)
+continuation = gamma**(m-1) * next_value
+target = TD0.generate(reward_sum, continuation, terminated)
+```
+
+보상합은 기존 TD0를 역순 합성해 만들고, 학습 시점의 Target Network에서 Bootstrap을 읽는다.
+TD0가 한 gamma를 곱하므로 continuation에 gamma^(m-1)을 적용하면 요구한 gamma^m이 된다.
+gamma=0,m=1도 지원한다. 자연 종료는 Bootstrap을 제거하고 Time-limit은 실제 마지막 관측으로 Bootstrap한다.
+
+기존 DQNLearner.learn이 외부 prediction/target이나 Horizon을 받지 않아 n-step 경로는 해당 learn을 그대로
+호출할 수 없다. 작은 `learn_real_n_step`에서 같은 공개 Model/TargetGenerator/UpdateRule/Optimizer를 직접
+사용한다. gather·no_grad Target 조회·zero_grad/backward/step 약 10줄이 기존 DQN과 반복된다.
+Private 메서드나 Optimizer 내부 상태 조작으로 우회하지 않는다. n=1 Metadata 경로와 기존 learn의
+파라미터·Adam 상태·결과가 정확히 일치함을 테스트한다. 일반 1-step Real과 모든 Planning은 기존 learn 그대로다.
+
+경계에서 Planning 후 남은 Window를 실제 m으로 Flush한다. Flush는 Replay 기록 생성이며 Gradient Step,
+환경 Step, 행동 선택, observe, Planning이나 RNG 소비를 추가하지 않는다. 학습은 설정된 train_frequency와
+Gradient Steps를 따른다. 실행 마지막에 생성된 Flush 기록은 후속 Replay 업데이트가 없으면 해당 run에서
+학습되지 않을 수 있다. 원래 Tabular Dyna-Q의 head 직접 갱신과 Neural Replay 기록의 책임을 구분한다.
+고정 실제 Step 예산의 마지막 열린 Episode는 외부 truncated cutoff로 표시하고 Bootstrap한다.
+이 부분 Episode는 완료 Episode의 Reward/Length 평균에서 제외해 별도 partial_episode로 보고한다.
+
+추가 검증은 n=1/3/5, gamma=0/.9/1, float32/64, CPU/CUDA, 짧은 종료·Truncation·잔여 Horizon·
+현재 Target 변경 후 재샘플 학습·중복 Minibatch·Real 지연 중 Planning과 실제 Sync 주기를 다룬다.
+Real 다단계 보상은 탐색 정책 아래 수집한 uncorrected n-step max backup이며 Importance Sampling이나
+Retrace, Q(σ) 보정을 구현한 것으로 간주하지 않는다. Planning Horizon은 항상 1로 독립적이다.
+
+### Checkpoint와 독립 Planning
+
+`plan`은 환경이나 Replay를 받지 않으며 step/observe/행동 선택/ε 변경을 하지 않는다.
+기존 World를 observe만으로 사전 구성한 뒤 호출하거나 온라인 관측 사이에 여러 번 호출할 수 있다.
+Idle 테스트는 환경 위치·TimeLimit 경과·환경/행동 RNG·World·Target을 유지하고 Online 파라미터와
+같은 Optimizer 상태만 변경되는지 확인한다. Timer, sleep 기반 Scheduler와 비동기 Worker는 구현하지 않는다.
+
+Checkpoint 테스트는 Online/Target/Optimizer의 공개 state_dict, World의 공개 state_dict,
+실제 Replay·Replay RNG·Planning/Behavior/n-step RNG·ε·카운터·Sync 설정·Pending Window·n-step Metadata를
+저장한다. 복원 후 같은 후속 실제 전이와 다음 샘플에서 Loss·파라미터·Optimizer 상태·행동/log_prob·RNG가
+정확히 일치한다. 샘플링 상태를 소실하지 않도록 실제 Replay 객체를 torch.save/load(weights_only=False)한다.
+이는 **현재 버전의 신뢰할 수 있는 자체 생성 객체**에 한정된 회귀 검증이다. 기존 ReplayBuffer에 공개
+checkpoint API가 없어 장기 호환 형식이나 보편적인 Learner checkpoint API가 검증된 것은 아니다.
+Buffer private RNG/저장소를 직접 읽거나 수정하지 않으며 새 프레임워크 API를 만들지 않는다.
+
+중간 Episode의 환경 위치·환경 RNG·TimeLimit 경과 Step까지 일반적으로 저장한 것은 아니다.
+실험 편의 run_steps 자체의 중단/재개 API도 제공하지 않는다. 고정 후속 전이를 입력한 학습 상태의 재개를
+검증하며 실제 환경 전체 Checkpoint 지원으로 과장하지 않는다. CUDA 재개에는 별도 CUDA RNG도 필요하다.
+
+### 구조적 평가와 향후 최소 확장 후보
+
+| 질문 | 검증 결과와 남은 범위 |
+|---|---|
+| 1. 기존 DQN 경로 공유? | 1-step Real/Planning은 동일 learn을 호출한다. n-step은 같은 공개 컴포넌트를 직접 조합한다. |
+| 2. UpdateRule 재사용? | 기존 TDLossUpdateRule에 Huber를 주입하며 수정하지 않는다. |
+| 3. Optimizer 하나? | 하나의 Adam과 Moment가 두 source를 누적한다. 중복 Optimizer를 만들지 않는다. |
+| 4. Target 하나? | 동일 Target을 읽고 외부 실제 Step 스케줄로 hard sync한다. |
+| 5. Replay 책임? | 실제 경험 저장·무작위 Batch 구성만 담당한다. 모델 예측이나 스케줄을 소유하지 않는다. |
+| 6. Tabular World + Neural Q? | raw 정수 ID 모델과 입력 경계 One-hot을 조합했다. World는 Neural일 필요가 없다. |
+| 7. 모델에서 Batch 직접 생성? | sample을 B회 호출해 Synthetic Batch를 만든다. Planning Buffer가 필요 없다. |
+| 8. Sampler 교체? | 예제의 synthetic_batch/plan 호출부를 교체할 수 있다. 공통 Strategy API는 아직 없다. |
+| 9. Environment/Planning 분리? | plan은 환경을 받지 않으며 Idle 반복 호출을 지원한다. |
+| 10. 사전학습/온라인 적응? | 기존 observe를 사전·실행 중 호출할 수 있다. Neural 모델 학습/Drift 대응은 없다. |
+| 11. 독립 Horizon? | Real n=1/3/5와 Planning 1을 같은 Network/Optimizer로 검증했다. |
+| 12. n-step Metadata 위치? | examples의 NStepExperience와 bounded deque다. 기존 경험 필드를 확장하지 않는다. |
+| 13. Window/Replay 관계? | Window는 시간순 pending 실제 경험, raw Replay는 실제 1-step, Metadata Replay는 eligible reward sum/m이다. |
+| 14. Real 지연 중 Planning? | 처음 n-1 Step과 Warm-up 중에도 관측·Planning한다. 경계 Flush는 별도 기록 작업이다. |
+| 15. Target 동기화 일관성? | Real/Planning이 같은 Target을 읽으며 실제 Step 기준 250마다 한 번 복사한다. |
+| 16. Idle-time Planning? | 독립 함수 호출로 연결 가능하다. 실행시간 Scheduler는 추가하지 않았다. |
+| 17. 연속 상태 World? | raw continuous 관측·모델 예측 dtype/device·Representation·상태/행동 후보 추출을 정의해야 한다. One-hot/Tabular Pair 저장은 교체 대상이다. |
+| 18. Priority Feedback? | 반환 signed td_error를 재사용할 수 있다. 선택 Pair ID와 연결·우선순위 갱신/추출은 추가 책임이다. |
+| 19. All-action? | World에 predict(state, action)/enumerate actions 등 명시적 질의와 미관측 Pair 처리 규칙이 필요하다. 현재 sample-only 결과만 있다. |
+| 20. 불확실성 기반 Q(σ)? | 모델 version/fidelity·uncertainty와 수집 시 σ·π/b·행동/경로·Horizon·경계·snapshot 의미가 필요하다. 단일 1-step Batch만으로 완성되지 않는다. |
+
+최소 공통화 후보는 외부 Target/Horizon으로 prediction→loss→optimizer 경로를 재사용하는 좁은 진입점,
+raw 경험과 Metadata의 안정적 저장·샘플 ID·공개 checkpoint 계약, 명시적인 source별 sampling/scheduling이다.
+예를 들어 Learner의 `optimize(prediction, target) -> TDLossOutput` 같은 공개 메서드 후보는
+Optimizer 소유권을 유지하면서 현재 반복되는 Loss/zero_grad/backward/step만 공유할 수 있다.
+Model 평가·Horizon·no_grad Target 정책은 호출자에 남긴다. 이는 향후 검토 후보이며 이번에 추가하지 않았다.
+현재 검증만으로 거대한 BaseLearner나 모든 알고리즘 Bootstrap 추상화를 추가할 근거는 없다.
+학습 기반 WorldModel, 불확실성/우선순위/All-action Planning과 Q(σ)-Planning은 향후 연구 범위다.
+
+```bash
+python -m examples.gridworld_dyna_dqn --steps 3000 --seeds 7 11 19
+python -m pytest -q tests/test_dyna_dqn_composition.py tests/test_gridworld_dyna_dqn.py
+```
+
+`08_dyna_dqn_modularrl.ipynb`는 별도 Neural 실습으로 600 실제 Step×3 Seed의 빠른 비교와 공유 상태,
+One-hot, Minibatch, n-step Metadata, Idle Planning을 예제 함수로 실행한다. 학습 수식을 중복 구현하지 않는다.
+실제 실행시간은 CLI에 보고하며 Notebook의 재현성 비교 출력에서는 제외한다. 기존 04–07의 셀·출력은 보존한다.
+
+### Gridworld 실험 결과 (실제 3,000 Step/run)
+
+γ=.9, Adam1e-4, Huber, MLP128×128, B32, Warm-up64, Replay10,000, train_frequency=1, gradient_steps=1,
+ε1→.05/2,000 실제 Step, Target250 실제 Step 설정으로 6구성×Seed7/11/19=18 run을 실행했다.
+모든 run은 실제 전이·환경 Step 3,000개, Real Gradient Step 2,937개, Periodic Sync 12회다.
+총 실제 Step=54,000, Real 업데이트=52,866, Planning 업데이트=72,000이며 총 Optimizer Step=124,866이다.
+모든 run의 별도 Greedy 평가가 DP 최적 경로와 같은 5 Step으로 목표에 도달했다. Dyna는 모두 40쌍을 관측했다.
+
+다음 max Q 대 DP V* RMSE는 비종료 10개 상태에서 비교한다. CLI 6자리 반올림 값을 집계했다.
+표준편차는 세 Seed의 모집단 표준편차(ddof=0)다.
+
+| 구성 | Seed7 | Seed11 | Seed19 | 평균±표준편차 | Planning/run | 시간 평균(초) |
+|---|---:|---:|---:|---:|---:|---:|
+| DQN | 0.000632 | 0.000219 | 0.000314 | 0.000388±0.000177 | 0 | 7.36 |
+| Dyna p=0 | 0.000632 | 0.000219 | 0.000314 | 0.000388±0.000177 | 0 | 7.23 |
+| Dyna p=1 | 0.000001 | 0.000000 | 0.000000 | 0.000000±0.000000 | 3,000 | 18.58 |
+| Dyna p=5 | 0.004351 | 0.000437 | 0.002491 | 0.002426±0.001599 | 15,000 | 69.49 |
+| Real n=3 / p=1 | 0.072063 | 0.093504 | 0.089485 | 0.085017±0.009306 | 3,000 | 21.47 |
+| Real n=5 / p=1 | 0.065167 | 0.091467 | 0.106628 | 0.087754±0.017129 | 3,000 | 21.44 |
+
+각 run에서 완료 Episode의 평균 Reward/Length를 계산한 뒤 Seed별 결과를 평균했다.
+실제 Step 예산 끝의 열린 Episode는 truncated cutoff로 학습하되 완료 Episode 평균에서 제외했다.
+
+| 구성 | Episode Reward | Episode Length | Real 평균 Loss | Planning 평균 Loss |
+|---|---:|---:|---:|---:|
+| DQN | 0.8971 | 8.13 | 0.003682 | — |
+| Dyna p=0 | 0.8971 | 8.13 | 0.003682 | — |
+| Dyna p=1 | 0.8854 | 7.75 | 0.001601 | 0.003499 |
+| Dyna p=5 | 0.8973 | 7.86 | 0.000462 | 0.001178 |
+| Real n=3 / p=1 | 0.9244 | 7.73 | 0.023168 | 0.005408 |
+| Real n=5 / p=1 | 0.9312 | 7.84 | 0.044330 | 0.007189 |
+
+실제 측정시간 합계는 436.743초다. 다른 검증을 병행한 동일 머신의 관측치이며 성능 벤치마크가 아니다.
+Planning=0은 DQN과 수치·동작이 같았고, 추가 observe/계측·초기 실행 비용으로 시간은 달라질 수 있다.
+Planning=1의 6자리 RMSE는 .000001/.000000/.000000으로, 0으로 출력된 값도 수학적 exact zero를 뜻하지 않는다.
+Planning=5는 더 많은 계산에도 Planning=1보다 RMSE가 컸다. 고정된 실제 Step Sync 사이에 더 많은 업데이트가
+들어가며 탐색 경로도 바뀌므로 단조 성능 향상을 요구하지 않는다. Real n=3/5 역시 최적 시작 경로를 얻었지만
+전체 상태 max Q의 오차는 1-step보다 컸다. 같은 시작 경로의 최적성과 모든 상태가치의 정확성은 구분한다.
+각 n=3/5의 Seed별 Flush 기록 수는 778/761/790 및 1544/1505/1544다. 실제 Horizon을 보존했으며
+Flush가 추가 Optimizer Step을 만들지 않아 Real 업데이트 수는 같은 2,937개다.
+
+### 최종 회귀 검증
+
+전체 `python -m pytest -q`는 **1,974 passed, 111 skipped(CUDA 미지원)**로 통과했다.
+실행 시간은 3,121.96초(52분 1초)다. 신규 Dyna-DQN 단위·환경/Checkpoint 테스트는
+77 passed/42 skipped이며 종료 Target=[100,200]에서도 Bootstrap을 제거하는 보강을 포함한다.
+기존 예제 17개 Smoke Test, 3,000 실제 Step×18 run의 새 CLI 비교와 Warm-up 이전 1-Step CLI도 통과했다.
+경험 부족 시 실제 업데이트가 0인 것을 정상 출력하며 빈 평균의 NaN/RuntimeWarning을 만들지 않는다.
+
+04/05/06/07/08 다섯 Notebook을 각각 같은 Kernel에서 Run All 두 번 실행했다.
+텍스트·수치·PNG는 두 실행 사이에 같았으며 저장된 Notebook 출력과도 같다.
+PNG는 총 40개(4/11/19/3/3개)다. 새 08은 23개 셀/코드 12개/PNG 3개이며 그림을 시각적으로 확인했다.
+목표 State의 Neural Q 출력은 직접 학습하지 않아 임의 값일 수 있음을 설명했고,
+종료 Mask와 비종료 상태 RMSE를 구분했다. 실행 후 추가한 설명은 계산 코드나 출력을 바꾸지 않는다.
+
+기존 `modular_rl/` Python 61개 파일은 byte hash와 파일 집합이 모두 작업 전과 같다.
+기존 04–07 네 Notebook은 셀·출력·metadata를 포함한 전체 byte hash가 같고,
+Tabular Dyna-Q·SARSA·n-step SARSA·CartPole 보호 대상 예제도 그대로다.
+모든 구현 변경은 새 예제에 한정하며 기존 공개 API나 프레임워크 추상 계층은 바꾸지 않았다.

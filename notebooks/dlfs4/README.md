@@ -1,6 +1,6 @@
 # 밑바닥부터 시작하는 딥러닝 4 — ModularRL 실습
 
-프로젝트 가상환경에 `pip install -e ".[notebooks]"`로 설치하고 이 폴더에서 네 Notebook을
+프로젝트 가상환경에 `pip install -e ".[notebooks]"`로 설치하고 이 폴더에서 다섯 Notebook을
 위에서부터 실행한다. Kernel 등록·선택 명령은 [프로젝트 README](../../README.md#jupyter-notebooks--deep-learning-from-scratch-4)에 있다.
 `plotting.py`는 좌표에 값·정책 화살표를 표시하는 작은 함수만 제공한다. 환경 생성·샘플링·RMSE·학습은 포함하지 않는다.
 
@@ -10,11 +10,13 @@
 | [05_mc_modularrl.ipynb](05_mc_modularrl.ipynb) | 주사위 평균, MC Return, On/Off-policy Prediction/Control, Ordinary/Weighted IS·DP 비교 |
 | [06_td_modularrl.ipynb](06_td_modularrl.ipynb) | TD(0) Prediction, 동일 Episode MC 비교, Q-learning/SARSA, 실제 Next Action·Greedy 비교 |
 | [07_dyna_modularrl.ipynb](07_dyna_modularrl.ipynb) | Sutton & Barto Chapter 8 Dyna-Q, Planning 예산, Real n-step / Planning 1-step, Offline·Idle Planning |
+| [08_dyna_dqn_modularrl.ipynb](08_dyna_dqn_modularrl.ipynb) | Neural Q·Replay·공유 Optimizer/Target, Dyna-DQN Planning 예산, Real n-step, Idle Planning |
 
 07은 위 DLFS4 환경을 재사용하는 Sutton & Barto Chapter 8 확장 실습이며 DLFS4 원본 Notebook을
 옮긴 것으로 간주하지 않는다. 예제 함수만 호출하고 기존 04–06 셀·출력은 변경하지 않는다.
 1,000 실제 Step/Seed7·11·19에서 Q-learning과 Dyna Planning=0/5/10, Real n=1/3/5를 비교한다.
-테스트는 네 Notebook 모두 같은 Kernel에서 두 번 실행해 텍스트·수치·PNG 출력을 비교한다.
+08은 Neural 학습 상태와 Replay/Target의 책임을 별도로 다루며 기존 04–07을 변경하지 않는다.
+테스트는 다섯 Notebook 모두 같은 Kernel에서 두 번 실행해 텍스트·수치·PNG 출력을 비교한다.
 
 ## 확인한 원본
 
@@ -300,3 +302,30 @@ Reward/Length, c/ρ 통계와 Q-table을 출력한다. CLI는 n=1/3/5도 검증�
 총 34개 PNG가 일치한다. 06은 106개 셀/코드 60개/PNG 19개이고 기존 87개 셀·출력·메타데이터와
 라이브러리 61개 Python 소스를 그대로 보존한다. 전체 Gridworld 비교 153개 run은
 30,600 Episode·1,305,855 Step=Update이며 모두 자연 종료했다.
+
+## Dyna-DQN 조합 실습 (08)
+
+08은 raw State ID → 고정 One-hot → 기존 MLP/Q Head를 구성하고 같은 DQNLearner·Adam·Target을
+Real Replay와 World Model 예측 Batch에 공유한다. 모델 생성 전이는 실제 Replay에 넣거나 다시 observe하지 않는다.
+600 실제 Step×Seed7/11/19에서 DQN/Dyna Planning=0/1/5, Real n=3/5 + Planning=1을 비교한다.
+CLI 3,000-Step 실험은 ARCHITECTURE.md에 별도로 기록한다. 짧은 실습의 Greedy 성공을 강제하지 않는다.
+
+기본값은 128×128 MLP, Adam1e-4, Huber, γ=.9, Batch32, Warm-up64, Replay10,000,
+실제 Step250마다 Target Sync, ε1→.05(2,000 Step)다. Planning은 매 실제 Step에 추가되며
+Idle Planning은 환경 Step·observe·자동 Sync를 수행하지 않는다.
+
+Real n-step은 예제 Metadata에 보상합/실제 Horizon을 저장하고 학습 시점 Target Network로 Bootstrap한다.
+Flush는 Metadata 생성이며 별도 Gradient Step이 아니다. 기존 learn의 1-step 경계 때문에 n-step의
+prediction→TD0→TDLoss→같은 Optimizer 연결을 작은 예제 함수에서 수행한다.
+Checkpoint는 공개 Model/Target/Optimizer/World 상태와 모든 학습 RNG·카운터·Pending/Metadata를 포함한다.
+기존 Replay의 공개 checkpoint API가 없어 자체 생성한 현재 버전 객체를 직렬화하는 테스트이며,
+장기 호환 저장 형식이나 일반 환경의 중간 Episode 복원을 보장하지 않는다.
+
+Notebook은 예제의 공개 함수만 호출한다. 실행시간은 CLI에만 출력해 두 번 Run All의 수치/그림 비교와 분리한다.
+Planning=0의 bit-exact 독립 DQN 비교, Target6.4/종료3/Truncation6.4, 공유 Momentum/Adam,
+B1/4/32·dtype/device·Idle·재개는 단위·통합 테스트에서 확인한다.
+
+최종 Dyna-DQN 검증: 전체 pytest **1,974 passed/111 skipped(CUDA)**, 신규 테스트 77 passed/42 skipped,
+기존 예제 17개 Smoke Test 통과. 04–08 다섯 Notebook의 같은 Kernel Run All 두 번과 저장 출력이
+일치하며 PNG는 총 40개다. 08은 23개 셀/코드 12개/그림 3개다. 기존 04–07 파일 전체와
+라이브러리 61개 Python 파일의 byte hash를 보존했다.

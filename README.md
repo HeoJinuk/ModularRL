@@ -1009,7 +1009,8 @@ planning, without additional actions or environment steps.
 compares three seeds with DP, and demonstrates offline model initialization and
 idle planning. Existing notebooks and all `modular_rl/` implementations remain
 unchanged. This is a deterministic tabular sample model; stochastic/continuous
-world models, prioritized planning and Dyna-DQN remain future work. Model, world
+world models and prioritized planning remain future work. Neural Q composition is
+validated separately below. Model, world
 model, RNGs, settings, pending real window and (for mid-episode resume) environment
 state are separate checkpoint responsibilities; see [architecture](docs/ARCHITECTURE.md#tabular-dyna-q-컴포넌트-조합-검증).
 
@@ -1050,3 +1051,41 @@ python -m pytest -q
 - `Model.act` returns a Torch tensor in `ActionOutput`; Runner is responsible for converting it into Gymnasium's expected action format. The Model contract is not a complete algorithm training implementation.
 - Action-conditioned critics `Q(s,a)` use the optional `Model.evaluate_q` path. Distributional critics require a compatible selector and update rule; no such algorithm is claimed implemented here.
 - Runtime shape/device checks are included for the implemented paths. Comprehensive cross-component static compatibility and vector-environment training are outside this reference's scope.
+
+## Dyna-DQN component composition
+
+```bash
+python -m examples.gridworld_dyna_dqn --steps 3000 --seeds 7 11 19
+python -m pytest -q tests/test_dyna_dqn_composition.py tests/test_gridworld_dyna_dqn.py
+```
+
+The example reuses one unchanged `DQNLearner`, online network, target network and
+Adam optimizer for real replay batches and batches predicted by the existing
+`TabularWorldModel`. Integer state IDs stay in replay/model storage; a frozen
+identity embedding followed by the existing MLP converts IDs to one-hot features
+at the Q Model boundary. Synthetic transitions never enter real replay or
+`world.observe`. Planning samples observed pairs with replacement and can run
+without environment steps.
+
+`plan(world, learner, steps=5, batch_size=32, rng=planning_rng)` reports actual
+optimizer updates and detached losses/TD errors. Real updates use warm-up and
+explicit sampling frequency. Target hard copies follow actual environment steps
+(default 250), including when planning adds extra gradients; idle planning does
+not advance periodic syncs. Planning=0 is tested bit-exact against an independent
+DQN loop, including batches, targets, optimizer state and RNGs.
+
+Real n=3/5 uses example-only reward-sum/horizon metadata, with bootstrap evaluated
+by the **current target network when sampled**. Planning remains one-step. The
+small n-step function composes the same public target/loss/optimizer components;
+the existing DQN `learn` API accepts only one-step transitions. Boundary flushing
+adds metadata records and does not override the configured gradient frequency.
+The final flushed records may await later replay learning.
+
+[Notebook 08](notebooks/dlfs4/08_dyna_dqn_modularrl.ipynb) keeps the neural experiment
+separate from Tabular Notebook 07. It calls example functions, compares six
+configurations over three seeds, and demonstrates shared optimizer state and idle
+planning. This validates model-generated experience routing, not neural world
+model generalization or a performance guarantee. Checkpoint tests preserve
+learning state; replay object serialization is version-bound and a general
+mid-episode environment checkpoint is outside scope. See
+[architecture](docs/ARCHITECTURE.md#dyna-dqn-컴포넌트-조합-검증) for results and limitations.
