@@ -14,7 +14,9 @@ class ActorCriticUpdateRule:
     Inputs are matching nonempty floating Tensors (B,). Only the advantage
     used in the actor loss is detached. Critic/target gradients remain caller
     controlled; the learner supplies a no_grad TD target. entropy is per-state
-    categorical entropy, not a sampled negative log probability.
+    categorical entropy, not a sampled negative log probability. An optional
+    explicit advantage supplies a fixed GAE actor signal; critic TD error and
+    the default target-value path remain unchanged.
     """
 
     def __init__(self, value_coef=0.5, entropy_coef=0.01):
@@ -24,18 +26,22 @@ class ActorCriticUpdateRule:
         self.value_coef = value_coef
         self.entropy_coef = entropy_coef
 
-    def compute(self, log_prob: Tensor, value: Tensor, target: Tensor, entropy: Tensor) -> ActorCriticOutput:
-        self._validate(log_prob, value, target, entropy)
+    def compute(self, log_prob: Tensor, value: Tensor, target: Tensor, entropy: Tensor,
+                *, advantage: Tensor | None = None) -> ActorCriticOutput:
+        self._validate(log_prob, value, target, entropy, advantage)
         td_error = target - value
-        actor_loss = -(log_prob * td_error.detach()).mean()
+        actor_advantage = td_error if advantage is None else advantage
+        actor_loss = -(log_prob * actor_advantage.detach()).mean()
         critic_loss = (0.5 * td_error.square()).mean()
         mean_entropy = entropy.mean()
         total_loss = actor_loss + self.value_coef * critic_loss - self.entropy_coef * mean_entropy
         return ActorCriticOutput(actor_loss, critic_loss, mean_entropy, total_loss, td_error)
 
     @staticmethod
-    def _validate(log_prob, value, target, entropy):
+    def _validate(log_prob, value, target, entropy, advantage=None):
         inputs = (log_prob, value, target, entropy)
+        if advantage is not None:
+            inputs += (advantage,)
         if any(not isinstance(tensor, Tensor) or not tensor.is_floating_point() for tensor in inputs):
             raise TypeError("log_prob, value, target and entropy must be floating Tensors")
         if value.ndim != 1 or value.numel() == 0 or any(t.shape != value.shape for t in inputs):
