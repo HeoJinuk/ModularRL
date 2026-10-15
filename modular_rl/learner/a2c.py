@@ -8,6 +8,7 @@ from torch.distributions import Categorical
 from torch.optim import Optimizer
 
 from modular_rl.data import ActorCriticOutput
+from modular_rl.component.target_generator.gae import GAEGenerator
 from modular_rl.data.rollout import RolloutBatch
 from modular_rl.learner._evaluation import evaluating
 from modular_rl.model import Model
@@ -25,7 +26,8 @@ class A2CLearner:
     The same ActorCriticUpdateRule as one-step AC handles the flattened samples.
     Bootstrap values/returns use eval/no_grad. Returned scalar metrics and
     signed multi-step td_error (T,N) are detached, in model dtype/device.
-    Learner owns no environment/buffer and implements neither GAE nor PPO.
+    GAEGenerator optionally supplies a fixed actor advantage and critic return.
+    Learner owns no environment/buffer and performs no PPO epoch reuse.
     Save Model/optimizer state and collection RNGs together for checkpoints.
     """
 
@@ -49,11 +51,19 @@ class A2CLearner:
         self._validate_freshness(rollout, value, log_prob)
         with torch.no_grad(), evaluating(self.model):
             next_value = self._value(self.model(following), count, reference).reshape(time, n_envs)
-            target = self.target_generator.generate(
-                rollout.reward, next_value, rollout.terminated, rollout.truncated,
-            )
+            if isinstance(self.target_generator, GAEGenerator):
+                generated = self.target_generator.generate(
+                    rollout.reward, rollout.value, next_value, rollout.terminated, rollout.truncated,
+                )
+                target = generated.returns
+                actor_options = {"advantage": generated.advantage.reshape(count)}
+            else:
+                target = self.target_generator.generate(
+                    rollout.reward, next_value, rollout.terminated, rollout.truncated,
+                )
+                actor_options = {}
 
-        result = self.update_rule.compute(log_prob, value, target.reshape(count), policy.entropy())
+        result = self.update_rule.compute(log_prob, value, target.reshape(count), policy.entropy(), **actor_options)
         self.optimizer.zero_grad()
         result.total_loss.backward()
         self.optimizer.step()
