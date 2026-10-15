@@ -1,11 +1,13 @@
 # ModularRL 아키텍처와 데이터 계약
 
 ModularRL은 연구·교육용 강화학습 라이브러리를 위한 Model·경험 데이터·기본
-ReplayBuffer·TD(0) TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·TabularSARSALearner·DQNLearner와
+ReplayBuffer/SequenceReplayBuffer·TD(0)/MC/n-step TargetGenerator·Tabular/Neural UpdateRule·TabularQLearner·TabularSARSALearner·DQNLearner와
 Tabular DP, On/Off-policy Monte Carlo Prediction/Control 및 TD(0) Prediction 참조 구현이다.
 Tabular Q-learning은 FrozenLake, 기본 DQN은 CartPole, DP/MC/TD Prediction 비교는
 Sutton Gridworld, On/Off-policy MC Control은 교재 3×4 Gridworld에서 실행할 수 있다. Runner, Agent,
-Off-policy SARSA, 다른 Neural Learner, WorldModel/Planner는 아직 포함되지 않는다.
+범용 Off-policy SARSA Learner, 다른 Neural Learner, 라이브러리 수준 WorldModel/Planner는 아직 포함되지 않는다.
+Expected SARSA·Double Q·Online multi-step·Dyna는 예제 조합 지원이며, 신규 Gymnasium Notebook과
+Sequence Replay/DQN n-step 경로의 현재 계약은 문서 마지막 절과 GYMNASIUM_TUTORIALS.md에 정리한다.
 목표 구성은 `Runner = Environment + Agent`, `Agent = Model + Learner`이며,
 현재 Model은 다음 흐름을 구현한다.
 
@@ -2798,8 +2800,8 @@ TDLoss 기본은 MSE이고 기존 CartPole 예제는 `SmoothL1Loss(reduction="no
 | 같은 Target 공유? | 같은 `target_model`을 no_grad/eval로 사용한다. |
 | Optimizer 상태 공유? | 동일 Adam 한 개가 두 source의 Gradient Step과 Moment를 누적한다. |
 | Target 동기화 시점? | Learner는 자동 주기를 갖지 않는다. 기존 CartPole처럼 예제의 실제 환경 Step 주기를 유지한다. |
-| Target/Loss/Optimizer 분리? | TD0/TDLoss는 독립 컴포넌트다. 기본 learn은 세 단계를 묶고 공개 외부 Target 경로는 없다. |
-| n-step 지원? | TD0는 한 단계 수식, TDLoss는 외부 Tensor를 받는다. n-step은 예제에서 보상합/Horizon을 조합한다. |
+| Target/Loss/Optimizer 분리? | TD0/TDLoss는 독립 컴포넌트다. 기본 learn은 세 단계를 묶고 optimize(prediction,target)가 외부 Target 경로를 제공한다. |
+| n-step 지원? | 기존 예제는 보상합/Horizon Metadata를 조합한다. 신규 라이브러리 경로는 SequenceBatch·NStepTargetGenerator·DQNLearner.learn이며 아래 회귀 경로와 구분한다. |
 | Replay source 구분? | 공개 source 필드가 없다. Real 전이만 한 Replay에 넣어 출처를 유지한다. |
 
 `modular_rl/`과 기존 Tabular Dyna/Q-learning 예제는 변경하지 않는다. 새로운 DynaDQNLearner,
@@ -2899,6 +2901,9 @@ Planning은 Torch 행동 RNG를 소비하지 않는다. 확률적 Neural World/D
 다시 설계해야 한다. Planning으로 Q가 바뀌어 이후 행동이 바뀌는 현상은 RNG 독립성 위반이 아니다.
 
 ### Real n-step과 Planning 1-step의 경계
+
+이 절은 보존된 Dyna-DQN 예제의 Metadata 경로를 설명한다. 신규 SequenceReplayBuffer 경로는
+후행 `Ordered replay and reward-only n-step targets` 절을 참고한다. 두 경로의 수학적 동등성을 검증한다.
 
 `NStepExperience`는 예제에만 있는 frozen dataclass다. owned CPU scalar인 시작 observation/action,
 discounted reward_sum, 마지막 next_observation/terminated/truncated와 실제 horizon m, gamma를 보존한다.
@@ -3094,3 +3099,143 @@ quickstart, FrozenLake, CartPole와 기존/신규 Gridworld를 포함한 18개 C
 원본 핵심 Python 61개 중 dqn.py만, 예제 18개 중 gridworld_dyna_dqn.py만 변경했다.
 기존 테스트 52개 파일은 그대로이며 신규 최적화 테스트만 추가했다. 두 학습 함수의 public signature와
 최적화 이전 계산은 AST 비교에서도 동일하다. 후속 Window/Replay/World Model/Runner 리팩터링은 수행하지 않았다.
+
+## Ordered replay and reward-only n-step targets
+
+### Replay input compatibility
+
+`ReplayBuffer.add(transition)` and `add(transition=transition)` remain supported.
+The same operation also accepts the six Transition fields, an optional seventh
+`log_prob`, or their positional/keyword combination. Python's Transition argument
+binding rejects missing/duplicate fields. Mixing a Transition object with extra
+fields is an error. All forms enter the same schema validation and owned,
+detached CPU snapshot path before changing storage. Sampling remains uniform,
+without replacement, using the existing private NumPy Generator. `clear()` does
+not rewind that RNG. Transition remains useful for Episode and B=1 online updates.
+
+### SequenceReplayBuffer and SequenceBatch
+
+`SequenceReplayBuffer(capacity, seed=...).add(...)` uses the same add forms and
+field schema as ReplayBuffer, but retains chronological order. This first version
+supports **one sequential environment stream**. Non-boundary transitions must be
+continuous (`previous.next_observation == current.observation`); interleaved
+vector/asynchronous environments need a future explicit stream-ID contract.
+
+`sample(batch_size, length=n)` uniformly samples distinct eligible **starting
+positions**, not episodes. A start is eligible after n observed transitions or
+when a real terminated/truncated boundary certifies a shorter tail. Open tails
+with fewer than n steps are ineligible. A ring overwrite removes old starts;
+retained windows only use retained, consecutive transitions and never cross an
+episode boundary. `num_sequences(length)` counts candidates without consuming
+RNG and lets training loops express warm-up. `len(buffer)` counts stored steps.
+
+SequenceBatch tensors have shapes:
+
+|Field|Shape / dtype|
+|---|---|
+|observation, next_observation|(B,T,*observation_shape), original dtype|
+|action|(B,T) integer or (B,T,A) floating|
+|reward, optional log_prob|(B,T), original dtype|
+|terminated, truncated, valid|(B,T), bool|
+|horizon|(B,), long|
+
+Each valid row is a nonempty prefix. Padding is zero and has no experience
+meaning. Real termination and external truncation are preserved independently;
+the collector supplies the actual final observation, not an autoreset observation.
+Short rows end at a real boundary. Storage and sampled tensors do not alias the
+caller or each other, and have no graph. `.to(device, dtype=...)` casts floating
+fields only, preserving integer states/actions, bool masks and long horizons.
+SequenceBatch represents replay rows, not a generic (T,B) trajectory framework.
+Buffer performs no discounting, model evaluation or target calculation.
+
+### NStepTargetGenerator and DQN integration
+
+`NStepTargetGenerator(gamma).generate(rewards, next_value, terminated, valid)`
+accepts rewards/flags/mask (B,T) and externally evaluated next_value (B,).
+The nonempty prefix mask defines m. Shapes/devices match without broadcasting;
+rewards and next_value share a floating dtype. An interior terminal step is invalid.
+
+For each row it computes
+`sum(k=0..m-1, gamma**k * reward[k]) + gamma**m * (1-last_terminated) * next_value`.
+Rewards are folded backward and bootstrap is discounted separately, preserving
+the existing Dyna-DQN example's reward-sum arithmetic. Masked padding is removed
+before arithmetic (including NaN/Inf padding); terminal bootstrap is masked even
+if its supplied value is nonfinite. Truncated-only rows retain bootstrap. Caller
+chooses the endpoint value (max Q, actual next-action Q, V, etc.) and manages
+no_grad/detach. The generator preserves gradients and owns no Model/Buffer/Optimizer.
+It deliberately does not inherit TD0's incompatible one-step interface.
+
+DQNLearner preserves its existing five positional constructor arguments and
+`learn(TransitionBatch)`, `optimize(prediction,target)`, `sync_target()` behavior.
+An optional keyword-only `n_step_target_generator` supplies the new component;
+when omitted, it defaults to the existing TD0 generator's gamma. Both gamma values
+must agree at construction. Configure gamma before constructing the Learner.
+
+`learn(SequenceBatch)` performs: first state/action -> Online Q gather -> last
+valid next observation -> current Target eval/no_grad max Q -> n-step target ->
+existing optimize. No bootstrap Q is stored in replay. Short horizons are evaluated
+with their actual m. Existing one-step evaluation/optimizer order is unchanged.
+The same Learner/Online/Target/Optimizer can alternate real n-step batches and
+planning one-step batches; synchronization remains an external schedule.
+
+The old `examples/gridworld_dyna_dqn.py` NStepExperience,
+make_n_step_experience and learn_real_n_step remain intact as regression references.
+Their example-only metadata deque is not silently replaced in old experiments.
+New notebooks use the library SequenceReplayBuffer path. No new BaseLearner,
+Runner, Agent, Planner or WorldModel framework is introduced.
+
+Random replay of an n-step sequence is **not online on-policy SARSA**. Existing
+SARSA windows preserve selected-action timing and flush order. Tree Backup and
+Q(sigma) additionally need intermediate Q/policy/sigma/importance data; this
+reward-only generator does not automatically implement those algorithms.
+
+### Gymnasium tutorials and supported scope
+
+`notebooks/gymnasium/00` through `16` independently construct components and call
+Gymnasium reset/step in visible loops. Default mode is FULL; set
+`MODULARRL_FAST=1` for a small API/shape smoke budget. Evaluation has a separate
+environment, never calls learn, and all environments are closed. Plotting/evaluation
+helpers contain no training loop or return formula. Notebook source records API
+friction and leaves editable evaluation tables.
+
+- Library APIs: DP, MC prediction/control, TD(0) prediction, tabular Q-learning,
+  SARSA, DQN, Replay/Sequence replay, TD0/MC/n-step targets and existing UpdateRules.
+- Example composition support: Expected SARSA, Double Q, online n-step SARSA,
+  fixed-target off-policy n-step prediction, Tree Backup, Q(sigma), TabularWorldModel
+  and Dyna planning. These notebooks reuse examples functions rather than copying
+  their return equations or claiming installed public Learner classes.
+- Fixed-target Tree Backup/Q(sigma) notebooks are policy evaluation, not control.
+  Q(sigma) retains the earlier documented Eq. (7.17) body boundary interpretation;
+  its discrepancy with the textbook pseudocode is not claimed to be an officially
+  acknowledged erratum.
+- Dyna-DQN uses FrozenLake's integer IDs and an observed-pair tabular sample model.
+  Learned continuous-observation World Models, CartPole Dyna-DQN, prioritized replay
+  and all-action planning are not provided.
+
+See [GYMNASIUM_TUTORIALS.md](GYMNASIUM_TUTORIALS.md) for the notebook list, API
+examples and actual validation/performance results. Existing DLFS4 notebooks and
+all old algorithm examples remain regression references.
+
+Initial integration checks: 72 new Buffer/target/learning cases passed (14 CUDA
+cases skipped on this host); the final non-notebook suite passed 2,086 cases
+(149 CUDA skips). All 17 Gymnasium tutorials passed FAST Run All twice, comparing
+text/numeric output and 35 rendered PNGs per run. Full-suite and FULL n-step
+measurements are recorded in the tutorial guide after completion.
+
+FULL examples on seed 7 completed: FrozenLake Q-learning achieved 100/100 greedy
+successes after 1,500 episodes; CartPole 1-step DQN improved mean evaluation return
+9.2 -> 186.55 and n=3 replay DQN improved 9.2 -> 287.0 after 400 episodes each.
+Their environment-step budgets differ (35,232 vs 61,342); no statistical superiority
+claim follows from this single-seed measurement.
+
+Existing DLFS4 04–08 each passed Run All twice in one kernel. Their executed
+sources and text/numeric/PNG payloads also match Phase 1's executed references
+(40 PNGs). Existing notebook files, examples and pre-existing user work retain
+their starting hashes. The 18 existing CLI smoke examples passed unchanged.
+
+The final collected suite has 2,257 cases. Disjoint verification of the latest
+Core (2,086 passed / 149 CUDA skips), existing notebooks (5 passed) and new
+notebooks (17 passed) covers all cases: 2,108 passed / 149 skipped. The long
+existing-notebook run itself reported 2,087 passed / 145 skipped in 3,100.31s;
+B=1 parameter cases added after its collection are covered by the final Core
+rerun. Exact commands and scope accounting are in GYMNASIUM_TUTORIALS.md.

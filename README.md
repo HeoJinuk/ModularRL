@@ -1,6 +1,21 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer, TD/MC targets, TD UpdateRules, TabularQLearner, TabularSARSALearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner, Agent, off-policy SARSA and other Neural Learners are not implemented.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer/SequenceReplayBuffer, TD/MC/n-step targets, TD UpdateRules, TabularQLearner, TabularSARSALearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner, Agent and other Neural Learners are not implemented as library APIs. Expected SARSA, Double Q, online multi-step methods and Dyna are example compositions; see the tutorial guide for their exact support boundaries.
+
+## Gymnasium algorithm notebooks
+
+[17 independent tutorials](docs/GYMNASIUM_TUTORIALS.md) in
+[`notebooks/gymnasium/`](notebooks/gymnasium/) show direct component construction,
+Gymnasium reset/step and visible learning loops: DP/MC/TD, Q-learning/SARSA,
+example-based multi-step compositions, Dyna, CartPole DQN and n-step DQN.
+Default mode is FULL; `MODULARRL_FAST=1` selects small API smoke budgets.
+Existing DLFS4 notebooks remain independent regression tutorials.
+
+Replay accepts `buffer.add(state, action, reward, next_state, terminated, truncated)`
+as well as existing Transition calls. `SequenceReplayBuffer.sample(B, length=n)`
+returns an owned `SequenceBatch`; `DQNLearner.learn(batch)` uses the new
+`NStepTargetGenerator` and current Target Network. See the tutorial guide for
+boundaries, padding, supported scope and actual learning results.
 
 ## Layout
 
@@ -9,6 +24,7 @@ modular_rl/
 ├── data/
 │   ├── outputs.py                  # ValueOutput / EstimatorOutput / ActionOutput
 │   ├── experience.py               # Transition / TransitionBatch
+│   ├── sequence.py                 # Ordered SequenceBatch (B,T,...)
 │   ├── episode.py                  # Owned, ordered Transition snapshots
 │   ├── updates.py                  # TDLossOutput
 │   └── mdp.py                      # TabularMDP / joint TransitionOutcome atoms
@@ -39,10 +55,12 @@ modular_rl/
     │   └── mlp.py                 # MLPRepresentation
     ├── buffer/
     │   ├── base.py                # add / sample / clear / len
-    │   └── replay.py              # Uniform replay with owned CPU snapshots
+    │   ├── replay.py              # Uniform replay with owned CPU snapshots
+    │   └── sequence.py            # Ordered single-stream replay, masks/horizons
     ├── target_generator/
     │   ├── base.py                # Tensor inputs → target Tensor
     │   ├── td0.py                 # One-step TD formula; caller supplies next_value
+    │   ├── n_step.py              # Reward-only n-step return with external endpoint
     │   └── monte_carlo.py         # Reverse complete-episode returns, no bootstrap
     ├── update_rule/
     │   ├── tabular.py             # Sequential in-place V/Q updates
