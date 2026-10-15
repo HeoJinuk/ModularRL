@@ -51,6 +51,8 @@ N_STATES/N_ACTIONS로 구분해 Selector 모듈 S와 충돌하지 않게 한다.
 |17_double_dqn|CartPole|DQN/Double DQN의 환경 step·Gradient Update·Sync 예산 통제|
 |18_actor_critic|CartPole|Categorical Policy/Scalar V, B=1 즉시 On-policy 학습|
 |19_a2c|CartPole|Async SAME_STEP, 시간 우선 Rollout, 경계별 Multi-step Return, T*N당 1회 학습|
+|20_gae|CartPole|실제 Rollout, lambda=0/.5/.95/1 Advantage, TD0/Return 동등성, Truncation Trace|
+|21_ppo|CartPole|Async SAME_STEP, GAE, 고정 Snapshot, Multi-epoch Minibatch PPO, KL/Clip 진단|
 
 19는 SAME_STEP을 지원하는 Gymnasium >=1.1이 필요하다(이번 검증 1.4.0).
 기존 환경이 1.0이면 `python -m pip install 'gymnasium>=1.1'`로 새 Vector 실습 의존성을 준비한다.
@@ -364,3 +366,90 @@ truncated로 기록한 193-Step 구간 하나가 포함된다. A2C는 열린 구
 이번 전체 회귀는 **2337 passed / 191 skipped**, 56분 19초다. Gymnasium 20개와 DLFS4 5개의
 두 차례 Run All 수치·RNG·텍스트·PNG 검증을 포함한다. CUDA 미사용 조건부 검사는 Skip했다.
 기존 예제 18개 Smoke Test와 examples 없는 격리 wheel의 Async→Rollout→A2C 학습도 통과했다.
+
+## 20–21: GAE와 PPO
+
+20은 GAE를 독립적인 Return/Advantage 추정기로 사용한다. TimeLimit=3의 실제 Async Rollout에서
+자연 종료와 Truncation을 분리하고 lambda=0은 TD0 residual, lambda=1은 고정 Value Snapshot이
+연속적인 경우 RolloutReturn과 같음을 검증한다. 시간순 그래프는 Truncation 이후 새 Episode의
+보상이 이전 Episode의 Trace에 들어가지 않는 모습을 보여준다. 마지막 셀은 같은 fresh Rollout을
+GAE A2C에 한 번 전달한다. Generator는 Gradient를 보존하고 Learner가 no_grad 경계를 관리한다.
+
+21은 별도 PPOBuffer 없이 B.Rollout을 재사용한다. 수집 당시 Policy/log_prob과 현재 학습 Policy를
+구분한다. 최초 learn 시작 때만 Snapshot을 비교하고, Epoch 안에서는 Policy 변화가 정상이다.
+GAE/Return/old_value/old_log_prob은 학습 시작 시 고정하며 Advantage 정규화는 전체 T*N에 한 번만
+적용한다. 상수/단일 표본 Advantage는 0이 되므로 Actor 신호가 사라질 수 있음을 명시한다.
+
+각 Epoch는 전용 shuffle_rng로 전체 표본을 섞어 한 번씩 사용한다. 작은 마지막 Minibatch도
+포함하고 지표는 표본 수 가중 평균이다. 근사 KL은 mean(ratio-1-log_ratio), Clip Fraction은
+mean(abs(ratio-1)>epsilon)이다. Model/Optimizer와 Shuffle RNG를 함께 복원하고, 환경과 Torch 행동
+RNG는 별도로 관리한다. KL 조기 종료·Value/Gradient Clipping은 없다.
+
+ActorCritic은 B=1 즉시 업데이트, A2C는 T*N당 한 Step, PPO는 여러 Epoch의 Minibatch Step이다.
+FULL 비교에서는 환경 전이 수와 함께 Optimizer Step 및 표본 재사용 횟수를 보고한다. 기존 25개
+Notebook 원본과 출력은 보존하고 두 새 Notebook만 추가한다. 성능 500은 pytest 조건이 아니다.
+
+### CartPole FULL 실행 기록 — 같은 81,920 환경 전이 예산
+
+CPU float32, Torch thread=1, Tanh MLP(64), Categorical+V, Adam, gamma=.99,
+value_coef=.5, entropy_coef=.01을 사용했다. Worker Seed는 seed+i이고 각 별도 Greedy 평가는
+20 Episode, seed=학습 seed+1000+i다. 같은 Seed에서도 두 알고리즘은 같은 경험을 뜻하지 않는다.
+
+|Seed|학습 전|PPO 평가 후|A2C 평가 후|PPO 완료 Episode|A2C 완료 Episode|
+|---|---:|---:|---:|---:|---:|
+|7|9.20|415.25|466.80|1218|1240|
+|11|10.60|483.70|282.50|1152|938|
+|19|9.35|427.65|409.75|1162|1012|
+|23|9.20|147.50|400.05|1285|1035|
+|42|9.15|197.50|176.00|1087|1176|
+
+5개 Seed 평균±population 표준편차(ddof=0)는 PPO **334.32±135.05**, A2C **347.02±104.41**이다.
+각 Seed 내 20 Episode 평균을 다시 요약한 통계이며 100 Episode를 독립 학습 표본처럼 합치지 않는다.
+
+|항목|PPO|A2C|
+|---|---:|---:|
+|N / T|4 / 128|4 / 5|
+|학습률|.0003|.001|
+|GAE lambda|.95|미사용, RolloutReturn|
+|수집 Rollout|160|4096|
+|Minibatch 표본 수|64|20 (전체 Rollout)|
+|Epoch / 표본 재사용|4|1|
+|Optimizer Step|5120|4096|
+|환경 전이|81920|81920|
+|총 학습 표본 사용|327680|81920|
+
+학습률과 Horizon 등 설정도 다르며 초기 후보를 최적화한 비교가 아니다. 이 예산/설정에서는 PPO가
+일관되게 우세하지 않았고 Seed 편차가 컸다. 500점 달성이나 알고리즘 우위를 테스트 조건으로 쓰지 않는다.
+기존 19 원본은 수정하지 않고 임시 Kernel 사본에서 예산만 81,920으로 맞춰 재실행했다.
+21의 Seed 7 FULL은 최종 그래프 소스로 다시 실행해 415.25를 재현했다. 새 20/21에는 실제 FULL
+출력과 그래프를 저장했다. 20은 고정 8×4 시연이며 FULL/FAST에서 같은 짧은 수집 예산을 사용한다.
+lambda=1과 RolloutReturn의 최대 오차는 2.3841858e-7(float32)였다.
+
+
+### GAE/PPO 최종 검증
+
+- 전체 `python -m pytest -q`: **2427 passed / 225 skipped**, 3217.47초(53분 37초).
+  Skip은 CUDA 미지원 조건부 검사이며 Notebook/환경 검증은 실행했다.
+- DLFS4 5개 + Gymnasium 22개, 총 **27개 Notebook**을 각각 같은 Kernel에서 두 번 실행해
+  텍스트·수치·RNG(해당 검사)·Model 상태와 PNG를 비교했다. 기존 25개 원본은 바이트 단위로 보존했다.
+- 선택적 Advantage 검증 호출을 정리한 최종 소스의 관련 단위/API/실제 Async 회귀:
+  **219 passed / 68 skipped**. 최종 신규 Notebook 별도 재검사도 **2 passed**였다.
+- 기존 예제 **18개 Smoke Test**(quickstart, DP/MC/TD/Control/n-step/Dyna, FrozenLake, CartPole)를 통과했다.
+- GAE lambda=0/1 동등성, .95 수치 [8.577305,6.991,4.2], 종료/Truncation 및 두 flag,
+  환경별 다른 경계, float32/64, Gradient 보존/차단과 다중 Step finite-difference gradcheck를 확인했다.
+- PPO의 양/음 Advantage와 Clip 방향, 범위 안/밖 Gradient, old log_prob/Advantage detach,
+  Critic/Entropy/Shared Representation Gradient와 비유한 입력·Ratio·Loss 실패를 확인했다.
+  수치 예의 policy_loss=-.56666667, value_loss=2, entropy=.4, total_loss=.42933333을 검증했다.
+- T=1/N=1, lambda=0, normalization=False, 1 Epoch/1 Minibatch에서 기존 AC와 Critic/Entropy,
+  전체 Gradient·Parameter·Optimizer Momentum 갱신을 비교했다. Actor/Total Loss 숫자 차이는 위에 설명했다.
+- 20개 표본/Minibatch 6/4 Epoch의 16 Step, 모든 표본 1회/Epoch, 작은 마지막 Batch,
+  고정 Snapshot/Target, 전역 1회 정규화, Epoch 중 Ratio 변화와 가중 지표 평균을 확인했다.
+- Model/Optimizer/전용 Shuffle RNG checkpoint 재개가 동일한 다음 갱신을 재현했고,
+  Shuffle은 Torch 행동 RNG를 소비하지 않았다. 초기 정책 변경/학습 후 재전달 거절도 확인했다.
+- 최종 wheel의 Python 모듈 **98개**가 현재 소스와 동일하다. 임시 경로에 설치한 `python -I`에서
+  저장소와 examples 없이 실제 spawn Async→Rollout→GAE→PPO 학습과 모든 Worker 종료를 통과했다.
+  wheel SHA256: `681bd2ac5e8e9db4fb8e2c3c415f056e13a2f5c4a02f7231a477b939601d92e3`.
+
+CPU에서 실제 학습/Gradient를 검증했으며 CUDA 실행은 이 장비에서 확인하지 못했다.
+현재 PPO는 Categorical Discrete Policy와 scalar V다. 연속 행동·Recurrent Policy·AMP,
+Value Clipping·KL 조기 종료·완전한 Rollout 소유권 인증·환경 중간 상태의 범용 Checkpoint는 남은 확장이다.

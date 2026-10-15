@@ -1,13 +1,13 @@
 # ModularRL — Model Contract v0.2
 
-> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer/SequenceReplayBuffer, TD/MC/n-step targets, TD UpdateRules, TabularQLearner, TabularSARSALearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner and Agent are not implemented as library APIs. Double DQN, immediate one-step categorical Actor-Critic and vector-rollout A2C are public Neural Learners. Expected SARSA, Double Q, online n-step SARSA, off-policy n-step SARSA, Tree Backup and Q(σ) are public Learners. Dyna World Model/planning are installed library APIs; see the API guide for exact support boundaries.
+> This is a **reference implementation of the Model layer, experience contracts, ReplayBuffer/SequenceReplayBuffer, TD/MC/n-step targets, TD UpdateRules, TabularQLearner, TabularSARSALearner, DQNLearner, tabular DP, on/off-policy MC prediction/control and TD(0) prediction**, not the entire ModularRL framework. Examples cover FrozenLake Q-learning, CartPole DQN, Sutton Gridworld DP/MC/TD comparison and the book's Gridworld MC prediction/control. Runner and Agent are not implemented as library APIs. Double DQN, immediate one-step categorical Actor-Critic, vector-rollout A2C and PPO with GAE are public Neural Learners. Expected SARSA, Double Q, online n-step SARSA, off-policy n-step SARSA, Tree Backup and Q(σ) are public Learners. Dyna World Model/planning are installed library APIs; see the API guide for exact support boundaries.
 
 ## Gymnasium algorithm notebooks
 
-[19 independent tutorials](docs/GYMNASIUM_TUTORIALS.md) in
+[22 independent tutorials](docs/GYMNASIUM_TUTORIALS.md) in
 [`notebooks/gymnasium/`](notebooks/gymnasium/) show direct component construction,
 Gymnasium reset/step and visible learning loops: DP/MC/TD, Q-learning/SARSA,
-public multi-step Learners, Dyna planning, CartPole DQN/n-step DQN, Double DQN, one-step Actor-Critic and vector-rollout A2C.
+public multi-step Learners, Dyna planning, CartPole DQN/n-step DQN, Double DQN, one-step Actor-Critic, vector-rollout A2C and PPO with GAE.
 Default mode is FULL; `MODULARRL_FAST=1` selects small API smoke budgets.
 Existing DLFS4 notebooks remain independent regression tutorials.
 
@@ -75,6 +75,32 @@ replay or target network. See [API contracts](docs/API.md) for outputs, modes an
 checkpoint ownership, and [notebooks 13/14/17/18](docs/GYMNASIUM_TUTORIALS.md) for
 explicit construction, training loops and measured results. A3C/PPO/GAE and
 continuous Actor-Critic remain future work.
+
+### GAE and PPO
+
+[`20_gae.ipynb`](notebooks/gymnasium/20_gae.ipynb) compares lambda=0/.5/.95/1
+using a real vector rollout, including Time-limit boundaries.
+[`21_ppo.ipynb`](notebooks/gymnasium/21_ppo.ipynb) constructs the components and
+trains CartPole with AsyncVectorEnv; it does not call an examples training wrapper.
+
+```python
+from modular_rl import targets as T, updates as U, learners as L
+
+learner = L.PPO(model, optimizer, T.GAE(gamma=.99, lam=.95),
+                U.PPO(clip_epsilon=.2), epochs=4, minibatch_size=64, seed=7)
+result = learner.learn(rollout)  # existing B.Rollout / RolloutBatch
+```
+
+ActorCritic uses an immediate B=1 update; A2C takes one update per T*N rollout;
+PPO reuses that rollout for multiple shuffled epochs. GAE estimates advantages
+and critic returns, without sampling actions or updating a model. A2C also
+accepts `T.GAE` with a fixed actor advantage. Existing `T.RolloutReturn` behavior
+is preserved. See [API contracts](docs/API.md#gae-and-ppo) for snapshots,
+normalization, metrics, RNG and checkpoint responsibilities.
+
+GAE/PPO verification: **2427 passed / 225 CUDA skips**, 27 notebooks run twice,
+18 example smoke tests and isolated-wheel Async training passed. Five-seed FULL
+results and settings are recorded in [the architecture guide](docs/ARCHITECTURE.md).
 
 ### Async vector rollout and A2C
 
