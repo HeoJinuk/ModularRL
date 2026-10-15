@@ -7,7 +7,8 @@ from modular_rl.environment.dlfs4_gridworld import (
 )
 from modular_rl.environment.tabular_env import TabularEnv
 from modular_rl.environment.episode_collection import collect_episode
+from modular_rl.environment.vector import final_observations, validate_vector_env
 
 __all__ = ["GRIDWORLD_ACTIONS", "sutton_gridworld", "TabularEpisodeSampler", "DLFS4_GRID_SHAPE",
            "DLFS4_STATES", "DLFS4_START_STATE", "dlfs4_gridworld", "TabularEnv", "collect_episode",
-           "make_sutton_gridworld_env", "make_dlfs4_gridworld_env"]
+           "make_sutton_gridworld_env", "make_dlfs4_gridworld_env", "final_observations", "validate_vector_env"]

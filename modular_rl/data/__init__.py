@@ -6,6 +6,7 @@ from modular_rl.data.mdp import TabularMDP, TransitionOutcome
 from modular_rl.data.outputs import ActionOutput, EstimatorOutput, ValueOutput
 from modular_rl.data.sequence import SequenceBatch
 from modular_rl.data.updates import ActorCriticOutput, TDLossOutput
+from modular_rl.data.rollout import RolloutBatch
 
 __all__ = ["ActionOutput", "EstimatorOutput", "ValueOutput", "Transition", "TransitionBatch", "SequenceBatch", "TDLossOutput",
-           "TabularMDP", "TransitionOutcome", "Episode", "ActorCriticOutput"]
+           "TabularMDP", "TransitionOutcome", "Episode", "ActorCriticOutput", "RolloutBatch"]
