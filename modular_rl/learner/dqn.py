@@ -82,10 +82,7 @@ class DQNLearner:
         self._validate_actions(actions, q.shape[-1])
         prediction = q.gather(dim=-1, index=actions.unsqueeze(-1)).squeeze(-1)
         with torch.no_grad():
-            self.target_model.eval()
-            next_q = self._q_values(self.target_model(batch.next_observation), batch_size, reference,
-                                   n_actions=q.shape[-1])
-            next_value = next_q.max(dim=-1).values
+            next_value = self._bootstrap(batch.next_observation, batch_size, reference, n_actions=q.shape[-1])
             target = self.target_generator.generate(batch.reward, next_value, batch.terminated)
 
         return self.optimize(prediction, target)
@@ -103,13 +100,17 @@ class DQNLearner:
         rows = torch.arange(batch_size, device=reference.device)
         last_observation = batch.next_observation[rows, batch.horizon - 1]
         with torch.no_grad():
-            self.target_model.eval()
-            next_q = self._q_values(self.target_model(last_observation), batch_size, reference,
-                                   n_actions=q.shape[-1])
-            next_value = next_q.max(dim=-1).values
+            next_value = self._bootstrap(last_observation, batch_size, reference, n_actions=q.shape[-1])
             target = self.n_step_target_generator.generate(batch.reward, next_value, batch.terminated, batch.valid)
 
         return self.optimize(prediction, target)
+
+    def _bootstrap(self, next_observation, batch_size, reference, *, n_actions):
+        """Target max Q, called under no_grad after current-action prediction."""
+        self.target_model.eval()
+        next_q = self._q_values(self.target_model(next_observation), batch_size, reference,
+                               n_actions=n_actions)
+        return next_q.max(dim=-1).values
 
     def optimize(self, prediction: Tensor, target: Tensor) -> TDLossOutput:
         """Apply one semi-gradient update to externally prepared Q predictions.
