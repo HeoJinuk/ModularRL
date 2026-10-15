@@ -15,3 +15,19 @@ class TDLossOutput:
 
     td_error: Tensor
     loss: Tensor
+
+
+@dataclass(frozen=True, slots=True)
+class ActorCriticOutput:
+    """Actor/critic mean losses, mean entropy, total loss and signed TD error.
+
+    The four metrics are scalar Tensors; td_error has shape (B,). All share
+    the input floating dtype/device. The UpdateRule retains graphs except
+    the actor's advantage; ActorCriticLearner returns detached metrics.
+    """
+
+    actor_loss: Tensor
+    critic_loss: Tensor
+    entropy: Tensor
+    total_loss: Tensor
+    td_error: Tensor
