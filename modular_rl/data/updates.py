@@ -32,3 +32,23 @@ class ActorCriticOutput:
     entropy: Tensor
     total_loss: Tensor
     td_error: Tensor
+
+
+@dataclass(frozen=True, slots=True)
+class PPOOutput:
+    """Six scalar metrics in input dtype/device and executed optimizer steps.
+
+    Rule losses retain gradients; diagnostics are detached and steps is zero.
+    Learner metrics are detached, weighted by minibatch sample counts over all
+    epochs (measured before each step, not a final-policy reevaluation).
+    approx_kl = mean(exp(log_ratio)-1-log_ratio); clip_fraction measures
+    abs(ratio-1)>clip_epsilon, regardless of advantage sign.
+    """
+
+    policy_loss: Tensor
+    value_loss: Tensor
+    entropy: Tensor
+    total_loss: Tensor
+    approx_kl: Tensor
+    clip_fraction: Tensor
+    optimizer_steps: int = 0

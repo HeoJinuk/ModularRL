@@ -6,5 +6,6 @@ from modular_rl.component.target_generator.monte_carlo import MonteCarloReturnGe
 
 from modular_rl.component.target_generator.n_step import NStepTargetGenerator
 from modular_rl.component.target_generator.rollout import RolloutReturnGenerator
+from modular_rl.component.target_generator.gae import GAEGenerator
 
-__all__ = ["BaseTargetGenerator", "TD0TargetGenerator", "MonteCarloReturnGenerator", "NStepTargetGenerator", "RolloutReturnGenerator"]
+__all__ = ["BaseTargetGenerator", "TD0TargetGenerator", "MonteCarloReturnGenerator", "NStepTargetGenerator", "RolloutReturnGenerator", "GAEGenerator"]
