@@ -3,4 +3,6 @@
 from modular_rl.component.buffer.base import BaseBuffer
 from modular_rl.component.buffer.replay import ReplayBuffer
 
-__all__ = ["BaseBuffer", "ReplayBuffer"]
+from modular_rl.component.buffer.sequence import SequenceReplayBuffer
+
+__all__ = ["BaseBuffer", "ReplayBuffer", "SequenceReplayBuffer"]
