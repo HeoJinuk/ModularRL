@@ -1,0 +1,88 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="838" viewBox="0 0 1400 838" role="img" aria-labelledby="title desc">
+<title id="title">ModularRL architecture</title><desc id="desc">ModularRL component architecture. The external environment provides observations to the Model and real transitions to experience buffers and, optionally, directly to a TabularWorldModel via observe(). The Model connects InputAdapter, Representation, Estimator and ActionSelector, which supplies actions to the environment. The Learner reuses the Model, TargetGenerator and UpdateRule, with an Optimizer for neural learners. Optional DynaPlanner samples the TabularWorldModel and invokes the same Learner. The external training loop owns collection, environment steps and scheduling.</desc>
+<defs>
+<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#62768e"/></marker>
+<marker id="arrAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#2b6cb0"/></marker>
+<marker id="arrPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#7451a8"/></marker>
+</defs>
+<rect x="0" y="0" width="1400" height="838" fill="#ffffff"/>
+<rect x="35" y="28" width="6" height="56" rx="3" fill="#2e7ac4"/>
+<text x="56" y="70" font-family="DejaVu Sans, Arial, sans-serif" font-size="45" fill="#102943" font-weight="700" text-anchor="start">ModularRL</text>
+<text x="383" y="69" font-family="DejaVu Sans, Arial, sans-serif" font-size="23" fill="#57718b" font-weight="400" text-anchor="start">Composable reinforcement learning in PyTorch</text>
+<text x="56" y="110" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#73869b" font-weight="400" text-anchor="start">Inference  ·  Learning  ·  Optional model-based planning</text>
+<path d="M 55 130 H 1345" stroke="#e7edf3" stroke-width="2"/>
+<g transform="translate(0,34)"><rect x="338" y="154" width="1007" height="214" rx="18" fill="#f4f9fe" stroke="#c8ddf3" stroke-width="1.6"/>
+<rect x="53" y="175" width="232" height="172" rx="16" fill="#f3faf6" stroke="#bcdcc6" stroke-width="1.6"/>
+<rect x="357" y="470" width="245" height="141" rx="14" fill="#fffaf2" stroke="#ebd9b4" stroke-width="1.6"/>
+<rect x="668" y="470" width="278" height="141" rx="14" fill="#f7f4fd" stroke="#d9c9ef" stroke-width="1.6"/>
+<rect x="1043" y="440" width="269" height="73" rx="14" fill="#f6f8ff" stroke="#cdd8f3" stroke-width="1.6"/>
+<rect x="1043" y="538" width="269" height="73" rx="14" fill="#f6f8ff" stroke="#cdd8f3" stroke-width="1.6"/>
+<rect x="1043" y="669" width="269" height="77" rx="14" fill="#f6f8ff" stroke="#cdd8f3" stroke-width="1.6"/>
+<rect x="357" y="669" width="245" height="77" rx="14" fill="#f7f5fe" stroke="#d5caec" stroke-width="1.6"/>
+<rect x="668" y="669" width="278" height="77" rx="14" fill="#f7f5fe" stroke="#d5caec" stroke-width="1.6"/>
+<path d="M 285 249 L 367 249" fill="none" stroke="#2b6cb0" stroke-width="3.1" stroke-linecap="round" marker-end="url(#arrAccent)"/>
+<path d="M 1231 215 V 126 H 170 V 175" fill="none" stroke="#2b6cb0" stroke-width="3.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrAccent)"/>
+<path d="M 176 347 V 542 H 355" fill="none" stroke="#62768e" stroke-width="3.0" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr)"/>
+<path d="M 802 368 V 470" fill="none" stroke="#7451a8" stroke-width="3.1" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrPurple)"/>
+<path d="M 840 470 V 368" fill="none" stroke="#7451a8" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arrPurple)"/>
+<path d="M 602 541 L 668 541" fill="none" stroke="#62768e" stroke-width="3.1" stroke-linecap="round" marker-end="url(#arr)"/>
+<path d="M 946 511 H 987 V 477 H 1043" fill="none" stroke="#62768e" stroke-width="2.7" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr)"/>
+<path d="M 946 577 L 1043 577" fill="none" stroke="#62768e" stroke-width="2.7" stroke-linecap="round" marker-end="url(#arr)"/>
+<path d="M 310 542 V 636 H 480 V 669" fill="none" stroke="#7451a8" stroke-width="2.9" stroke-linecap="round" marker-end="url(#arrPurple)" stroke-linejoin="round"/>
+<path d="M 602 710 L 668 710" fill="none" stroke="#7451a8" stroke-width="2.9" stroke-linecap="round" marker-end="url(#arrPurple)"/>
+<path d="M 815 669 L 815 611" fill="none" stroke="#7451a8" stroke-width="2.9" stroke-linecap="round" marker-end="url(#arrPurple)"/>
+<path d="M 946 593 H 997 V 707 H 1043" fill="none" stroke="#62768e" stroke-width="2.7" stroke-linejoin="round" stroke-linecap="round" marker-end="url(#arr)"/>
+<circle cx="310" cy="542" r="5" fill="#7451a8" stroke="#ffffff" stroke-width="1.7"/><text x="77" y="207" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#214d35" font-weight="700" text-anchor="start">Environment</text>
+<text x="77" y="240" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#446b52" font-weight="400" text-anchor="start">External</text>
+<text x="77" y="275" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#385a45" font-weight="400" text-anchor="start">reset()  ·  step()</text>
+<text x="77" y="313" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#657e6d" font-weight="400" text-anchor="start">Not owned by Model</text>
+<text x="370" y="189" font-family="DejaVu Sans, Arial, sans-serif" font-size="27" fill="#174e87" font-weight="700" text-anchor="start">Model</text>
+<text x="486" y="188" font-family="DejaVu Sans, Arial, sans-serif" font-size="18" fill="#517599" font-weight="400" text-anchor="start">inference &amp; action selection</text>
+<rect x="369" y="215" width="202" height="93" rx="11" fill="#ffffff" stroke="#b8d2eb" stroke-width="1.5"/>
+<text x="470.0" y="248" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#1a4269" font-weight="700" text-anchor="middle">InputAdapter</text>
+<text x="470.0" y="279" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#5d7083" font-weight="400" text-anchor="middle">scalar / NumPy / Tensor</text>
+<rect x="614" y="215" width="202" height="93" rx="11" fill="#ffffff" stroke="#b8d2eb" stroke-width="1.5"/>
+<text x="715.0" y="248" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#1a4269" font-weight="700" text-anchor="middle">Representation</text>
+<text x="715.0" y="279" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#5d7083" font-weight="400" text-anchor="middle">Identity / MLP</text>
+<rect x="859" y="215" width="202" height="93" rx="11" fill="#ffffff" stroke="#b8d2eb" stroke-width="1.5"/>
+<text x="960.0" y="248" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#1a4269" font-weight="700" text-anchor="middle">Estimator</text>
+<text x="960.0" y="279" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#5d7083" font-weight="400" text-anchor="middle">Q / V / Policy</text>
+<rect x="1104" y="215" width="207" height="93" rx="11" fill="#ffffff" stroke="#b8d2eb" stroke-width="1.5"/>
+<text x="1207.5" y="248" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#1a4269" font-weight="700" text-anchor="middle">ActionSelector</text>
+<text x="1207.5" y="279" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#5d7083" font-weight="400" text-anchor="middle">Greedy / ε-greedy / π</text>
+<path d="M 571 261 L 610 261" fill="none" stroke="#2b6cb0" stroke-width="2.7" stroke-linecap="round" marker-end="url(#arrAccent)"/>
+<path d="M 816 261 L 855 261" fill="none" stroke="#2b6cb0" stroke-width="2.7" stroke-linecap="round" marker-end="url(#arrAccent)"/>
+<path d="M 1061 261 L 1100 261" fill="none" stroke="#2b6cb0" stroke-width="2.7" stroke-linecap="round" marker-end="url(#arrAccent)"/>
+<text x="365" y="346" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#496c8e" font-weight="400" text-anchor="start">Model.forward() → EstimatorOutput    |    Model.act() → ActionOutput</text>
+<rect x="287" y="191" width="112" height="22" rx="7" fill="#ffffff" stroke="#d4e4f4" stroke-width="1"/>
+<text x="343" y="207" font-family="DejaVu Sans, Arial, sans-serif" font-size="14" fill="#27669e" font-weight="700" text-anchor="middle">observation</text>
+<rect x="909" y="113" width="96" height="26" rx="7" fill="#ffffff" stroke="#d4e4f4" stroke-width="1"/>
+<text x="957" y="132" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#27669e" font-weight="700" text-anchor="middle">action</text>
+<text x="382" y="507" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" fill="#906218" font-weight="700" text-anchor="start">Buffer</text>
+<text x="382" y="542" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#856f4b" font-weight="400" text-anchor="start">Replay · Episode</text>
+<text x="382" y="566" font-family="DejaVu Sans, Arial, sans-serif" font-size="15" fill="#856f4b" font-weight="400" text-anchor="start">SequenceReplay · Rollout</text>
+<text x="382" y="590" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#a1895f" font-weight="400" text-anchor="start">experience storage</text>
+<text x="695" y="508" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" fill="#623f98" font-weight="700" text-anchor="start">Learner</text>
+<text x="695" y="544" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#705c8f" font-weight="400" text-anchor="start">DQN · A2C · PPO · ...</text>
+<text x="695" y="574" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#705c8f" font-weight="400" text-anchor="start">Coordinates updates</text>
+<text x="695" y="593" font-family="DejaVu Sans, Arial, sans-serif" font-size="15" fill="#907eab" font-weight="400" text-anchor="start">and model calls</text>
+<text x="1065" y="469" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#394e8b" font-weight="700" text-anchor="start">TargetGenerator</text>
+<text x="1065" y="493" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#62749e" font-weight="400" text-anchor="start">TD(0) · n-step · GAE</text>
+<text x="1065" y="568" font-family="DejaVu Sans, Arial, sans-serif" font-size="21" fill="#394e8b" font-weight="700" text-anchor="start">UpdateRule</text>
+<text x="1065" y="593" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#62749e" font-weight="400" text-anchor="start">Tabular / neural loss</text>
+<text x="198" y="501" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#61788e" font-weight="400" text-anchor="start">transition</text>
+<text x="615" y="528" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#687d92" font-weight="400" text-anchor="start">data</text>
+<text x="852" y="401" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#7251a8" font-weight="400" text-anchor="start">Model</text>
+<text x="852" y="422" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#8b75aa" font-weight="400" text-anchor="start">calls / updates</text>
+<text x="57" y="664" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#775ba0" font-weight="700" text-anchor="start">OPTIONAL  ·  DYNA PLANNING</text>
+<text x="382" y="699" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#60428f" font-weight="700" text-anchor="start">TabularWorldModel</text>
+<text x="382" y="725" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#73658c" font-weight="400" text-anchor="start">Observed transitions</text>
+<text x="695" y="699" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#60428f" font-weight="700" text-anchor="start">DynaPlanner</text>
+<text x="695" y="725" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#73658c" font-weight="400" text-anchor="start">Samples → same Learner</text>
+<text x="1064" y="699" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#394e8b" font-weight="700" text-anchor="start">Optimizer</text>
+<text x="1064" y="726" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#62749e" font-weight="400" text-anchor="start">Neural Learners only</text>
+<text x="317" y="657" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#775ba0" font-weight="400" text-anchor="start">observe(transition)</text>
+<text x="826" y="643" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#775ba0" font-weight="400" text-anchor="start">plan() → learn()</text>
+<text x="56" y="784" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#697d91" font-weight="400" text-anchor="start">The external training loop owns environment steps, data collection, and scheduling.</text>
+</g></svg>

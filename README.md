@@ -3,6 +3,8 @@
 An educational and research reinforcement learning library built from interchangeable PyTorch components.
 Supports tabular DP/MC/TD control, DQN/Double DQN, Dyna, Actor-Critic, A2C and PPO with GAE.
 
+![ModularRL architecture: environment, model, experience storage, learner, and optional Dyna planning](docs/assets/modularrl_architecture.svg)
+
 Install from this checkout: `python -m pip install .`
 
 ```python
