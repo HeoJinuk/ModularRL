@@ -18,4 +18,5 @@ learner.learn(Transition(0, 1, 1.0, 1, False, False).to_batch())
 ```
 
 [API](docs/API.md) · [Architecture](docs/ARCHITECTURE.md) · [Tutorials](docs/GYMNASIUM_TUTORIALS.md)
+
 [MIT License](LICENSE) · Copyright (c) 2026 Jinuk Huh
