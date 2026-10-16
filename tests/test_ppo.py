@@ -84,7 +84,7 @@ def test_all_samples_once_per_epoch_frozen_snapshots_and_weighted_metrics(monkey
         torch.testing.assert_close(adv,generated[0].advantage.reshape(-1)[indices],rtol=0,atol=0)
     assert any(not torch.allclose(new,old) for _,_,new,old in records[4:])
     for field in fields(actual):
-        if field.name=='optimizer_steps':continue
+        if field.name in ('optimizer_steps','epochs_completed','early_stopped'):continue
         expected=sum(len(ids)*getattr(r,field.name).detach() for ids,r,_,_ in records)/80
         torch.testing.assert_close(getattr(actual,field.name),expected)
         assert not getattr(actual,field.name).requires_grad
@@ -121,7 +121,8 @@ def test_checkpoint_and_shuffle_rng_reproduce_updates_without_action_rng_consump
     x,y=a.learn(data),b.learn(data)
     assert torch.equal(rng,torch.get_rng_state())
     for field in fields(x):
-        if field.name!='optimizer_steps':assert torch.equal(getattr(x,field.name),getattr(y,field.name))
+        if isinstance(getattr(x,field.name),torch.Tensor):assert torch.equal(getattr(x,field.name),getattr(y,field.name))
+        else:assert getattr(x,field.name)==getattr(y,field.name)
     for p,q in zip(a.model.parameters(),b.model.parameters()):assert torch.equal(p,q)
     assert torch.equal(a.shuffle_rng.get_state(),b.shuffle_rng.get_state())
     c=make_ppo();c.shuffle_rng.manual_seed(11)

@@ -40,7 +40,7 @@ class PPOOutput:
 
     Rule losses retain gradients; diagnostics are detached and steps is zero.
     Learner metrics are detached, weighted by minibatch sample counts over all
-    epochs (measured before each step, not a final-policy reevaluation).
+    completed epochs (measured before each step, not a final-policy reevaluation).
     approx_kl = mean(exp(log_ratio)-1-log_ratio); clip_fraction measures
     abs(ratio-1)>clip_epsilon, regardless of advantage sign.
     """
@@ -52,3 +52,5 @@ class PPOOutput:
     approx_kl: Tensor
     clip_fraction: Tensor
     optimizer_steps: int = 0
+    epochs_completed: int = 0
+    early_stopped: bool = False

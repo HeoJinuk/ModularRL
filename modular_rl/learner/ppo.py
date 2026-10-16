@@ -1,7 +1,8 @@
 """PPO with fixed GAE targets and independently shuffled minibatches."""
 
 from dataclasses import fields
-from numbers import Integral
+from math import isfinite
+from numbers import Integral, Real
 
 import torch
 from torch import Tensor
@@ -29,16 +30,24 @@ class PPOLearner:
 
     Save Model, optimizer and shuffle_rng.get_state() together; restore the
     latter with shuffle_rng.set_state(). Environment/action RNGs are separate.
-    No environment, buffer, clipping of gradients or KL early stopping here.
+    Optional clipping uses the joint norm of unique, trainable optimizer
+    parameters; nonfinite norms raise before that minibatch's optimizer step.
+    Optional KL stopping evaluates the full rollout in eval/no_grad after an
+    epoch when another epoch remains. Module modes are restored; diagnostics
+    consume no shuffle/action RNG. Completed minibatch metrics are weighted by
+    actual sample counts. No environment or buffer is owned by the learner.
     """
 
     def __init__(self, model, optimizer, target_generator, update_rule, *,
-                 epochs=4, minibatch_size=64, seed=None, normalize_advantage=True):
+                 epochs=4, minibatch_size=64, seed=None, normalize_advantage=True,
+                 max_grad_norm=None, target_kl=None):
         self.model, self.optimizer = model, optimizer
         self.target_generator, self.update_rule = target_generator, update_rule
         self._validate_setup(epochs, minibatch_size, normalize_advantage)
+        self._validate_options(max_grad_norm, target_kl)
         self.epochs, self.minibatch_size = int(epochs), int(minibatch_size)
         self.normalize_advantage = normalize_advantage
+        self.max_grad_norm, self.target_kl = max_grad_norm, target_kl
         self.shuffle_rng = torch.Generator(device="cpu")
         if seed is None:
             self.shuffle_rng.seed()
@@ -76,6 +85,9 @@ class PPOLearner:
 
         totals = reference.new_zeros(6)
         optimizer_steps = 0
+        processed_samples, epochs_completed = 0, 0
+        early_stopped = False
+        parameters = self._optimized_parameters() if self.max_grad_norm is not None else None
         for _ in range(self.epochs):
             permutation = torch.randperm(count, generator=self.shuffle_rng)
             for indices in permutation.split(self.minibatch_size):
@@ -87,12 +99,42 @@ class PPOLearner:
                 )
                 self.optimizer.zero_grad()
                 result.total_loss.backward()
+                if self.max_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(parameters, self.max_grad_norm, error_if_nonfinite=True)
                 self.optimizer.step()
                 metrics = (result.policy_loss, result.value_loss, result.entropy,
                            result.total_loss, result.approx_kl, result.clip_fraction)
                 totals += torch.stack([metric.detach() for metric in metrics]) * len(indices)
                 optimizer_steps += 1
-        return PPOOutput(*(totals / (count * self.epochs)).unbind(), optimizer_steps)
+                processed_samples += len(indices)
+            epochs_completed += 1
+            if self.target_kl is not None and epochs_completed < self.epochs:
+                kl = self._epoch_kl(observations, actions, old_log_prob, reference)
+                if kl > self.target_kl:
+                    early_stopped = True
+                    break
+        return PPOOutput(*(totals / processed_samples).unbind(), optimizer_steps, epochs_completed, early_stopped)
+
+    def _optimized_parameters(self):
+        return list({id(p): p for group in self.optimizer.param_groups for p in group["params"]
+                     if p.requires_grad}.values())
+
+    @torch.no_grad()
+    def _epoch_kl(self, observations, actions, old_log_prob, reference):
+        with evaluating(self.model):
+            policy, _ = self._outputs(self.model(observations), len(actions), reference)
+            log_ratio = policy.log_prob(actions) - old_log_prob
+            kl = (log_ratio.exp() - 1 - log_ratio).mean()
+        if not torch.isfinite(kl):
+            raise ValueError("PPO epoch KL must be finite")
+        return kl
+
+    @staticmethod
+    def _validate_options(max_grad_norm, target_kl):
+        for name, value in (("max_grad_norm", max_grad_norm), ("target_kl", target_kl)):
+            if value is not None and (not isinstance(value, Real) or isinstance(value, bool)
+                                      or not isfinite(value) or value <= 0):
+                raise ValueError(f"{name} must be None or a positive finite real number")
 
     def _validate_setup(self, epochs, minibatch_size, normalize_advantage):
         for name, value in (("epochs", epochs), ("minibatch_size", minibatch_size)):
