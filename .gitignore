@@ -1,20 +1,49 @@
-.DS_Store
+# Python, test and analysis caches
 __pycache__/
 *.py[cod]
 .pytest_cache/
-*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local environments and generated package artifacts
+.venv/
+venv/
 /build/
 /dist/
+*.egg-info/
+
+# Local notebook, editor and operating-system state
+.ipynb_checkpoints/
+/.idea/
+/.vscode/
+/.ipython/
+.python_history
+.DS_Store
+
+# Local QA snapshots, logs, training runs and downloads
 /work/
+/logs/
+/*.log
+/checkpoints/
+/runs/
+/wandb/
+/lightning_logs/
+/data/downloads/
+/datasets/downloads/
+
+# Local credentials; keep sanitized examples reviewable
 .env
 .env.*
 !.env.example
-.venv/
-venv/
-.tox/
-.ruff_cache/
-.coverage
-htmlcov/
 *.pem
 *.key
+*.p12
+*.pfx
 .pypirc
+.netrc
+id_rsa
+id_ed25519

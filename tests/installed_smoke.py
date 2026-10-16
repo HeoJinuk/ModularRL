@@ -11,6 +11,7 @@ from pathlib import Path
 import sys
 
 import torch
+import numpy as np
 
 from modular_rl import Model, representations as R, estimators as E, selectors as S
 from modular_rl import buffers as B, targets as T, updates as U, learners as L
@@ -50,6 +51,11 @@ def main():
         for alias in public.__all__:
             cls = getattr(public, alias)
             assert getattr(original, cls.__name__) is cls
+
+    observation = np.array([1., 2.], dtype=np.float32)
+    probe = Model(R.Identity(), E.DiscreteQ(2, 2), S.Greedy())
+    assert probe(observation).values.q[0].shape == (2,)
+    assert probe.act(observation).action.cpu().numpy().shape == ()
 
     torch.manual_seed(7)
     torch.set_num_threads(1)

@@ -4,8 +4,9 @@
 
 - 사용자 결정: MIT License, Copyright (c) 2026 Jinuk Huh.
 - LICENSE는 MIT 표준 원문이며 pyproject의 SPDX 표기는 MIT다.
-- 프로젝트/GitHub 예정 이름은 ModularRL이다. 원격 저장소는 아직 만들지 않았으므로
-  Repository URL, Git remote, 공개 설치 URL을 만들지 않았다.
+- 프로젝트/GitHub 이름은 ModularRL이다. 사용자가 생성한 저장소는
+  https://github.com/HeoJinuk/ModularRL 이며 Repository URL을 pyproject에 반영했다.
+  Git remote 등록과 Push는 수행하지 않았다.
 - 기존 설치 호환성을 위해 Distribution 이름 modularrl-model-contract-demo와 버전 0.1.0,
   Python import modular_rl을 유지한다. GitHub 이름과 Distribution 이름은 다른 식별자다.
 - GitHub Release, PyPI 업로드와 Push는 수행하지 않는다.
@@ -41,8 +42,8 @@ Build/Twine 및 wheel/sdist 설치 Smoke Test를 수행한다. 장시간 Noteboo
 .github/workflows/full-tests.yml은 수동 workflow_dispatch로 전체 pytest와 Notebook 회귀를 실행한다.
 둘 모두 contents:read이며 credential 저장, 배포 권한이나 비밀정보를 요구하지 않는다.
 
-YAML과 해당 로컬 검증 명령은 확인한다. 원격 저장소가 없으므로 GitHub 호스팅 Runner의 실제 실행은
-저장소 생성 후 첫 CI에서 확인해야 한다. Python 3.12 이외 CI Matrix를 임의로 추가하지 않았다.
+YAML과 해당 로컬 검증 명령은 확인한다. GitHub 호스팅 Runner의 실제 실행은
+첫 Push 이후 CI에서 확인해야 한다. Python 3.12 이외 CI Matrix를 임의로 추가하지 않았다.
 
 ## 공개 코드와 문서
 
@@ -58,6 +59,12 @@ README는 빈 줄/코드 Fence를 포함해 19줄 영어다. API/ARCHITECTURE/GY
 Notebook 출력이나 기존 사용자 수정 파일은 삭제·재작성하지 않는다.
 
 ## 공개 적합성 감사와 남은 확인
+
+아래는 PPO 공개 준비 시점의 기록이다. 이후 전체 파일·main 이력·독립 의존성 설치를 추가 검사한
+최신 판정은 [PRE_PUBLICATION_AUDIT.md](PRE_PUBLICATION_AUDIT.md)를 따른다.
+개인 Git 이메일의 공개 여부는 사용자 검토 대상으로 남아 있다. macOS Intel의 기본 PyPI 설치는
+PyTorch 2.2.2와 NumPy 2.5.4의 연동에 실패했다. 사용자의 결정에 따라 의존성은 유지하며,
+다른 컴퓨터의 독립 설치 결과는 아직 확인하지 않았다. 기존 Conda 공유 설치 통과와 구분한다.
 
 작업 시작 시 242개 추적 파일과 모든 reachable Git Blob 463개(약 29.8 MB)를 대상으로
 Token 형태, PEM Private Key, 개인 절대경로와 일부 사설 서버 주소 패턴을 검사했다.
@@ -102,15 +109,15 @@ FAST 분기가 없는 기존 DLFS4 Notebook은 원래 실행 예산을 유지해
 |9개 Namespace Alias/중복 export|전체 공개 export identity 통과|
 |공개 Source Pyflakes/AST|미사용 import/examples 의존/한국어 주석·Docstring 후보 없음|
 |README|영어 19줄, 예제 실행 통과|
-|Workflow YAML|구조 검사 통과; GitHub Runner 실행은 저장소 생성 후|
+|Workflow YAML|구조 검사 통과; GitHub Runner 실행은 첫 Push 후|
 
 두 옵션 None의 계산·Gradient·Parameter·Optimizer 상태·RNG는 기준 구현과 정확히 같다.
 CartPole 평가의 Seed 평균은 baseline 334.32, clip 361.29, kl 338.72, clip_kl 420.25다.
 이는 고정된 다섯 Seed의 비교이며 일반적 성능 우위를 보장하지 않는다.
 상세 지표와 원시 결과는 [PPO_STABILITY.md](PPO_STABILITY.md)에 있다.
 
-기술 준비 후에는 사용자가 실제 GitHub 저장소를 만든 뒤 remote/Repository URL과 첫 호스팅 CI를
-확인해야 한다. URL/remote는 사용자 요청대로 현재 비워 둔다. 로컬 보관 ref와 미추적 사용자 자료는
+저장소 생성과 Repository URL 반영은 완료했다. Git 이메일 공개 검토와 다른 컴퓨터의 독립 설치,
+첫 Push 이후 호스팅 CI 확인이 남아 있다. Git remote는 아직 비어 있다. 로컬 보관 ref와 미추적 사용자 자료는
 이번 공개용 Commit 범위에 포함하지 않는다.
 
 
