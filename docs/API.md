@@ -29,9 +29,9 @@ Model의 생성자, forward/act/evaluate_q/encode와 데이터 출력 필드도 
 |representations|Identity, MLP|
 |estimators|TabularV, TabularQ, StateValue, DiscreteQ, ContinuousQ, DiscreteAdvantage, ActorCritic, CategoricalPolicy, GaussianPolicy, DeterministicPolicy|
 |selectors|Greedy, EpsilonGreedy, Categorical|
-|buffers|Replay, SequenceReplay|
-|targets|TD0, NStep, MCReturn|
-|updates|TabularV, TabularQ, TDLoss, ActorCritic|
+|buffers|Replay, SequenceReplay, Rollout|
+|targets|TD0, NStep, MCReturn, RolloutReturn, GAE|
+|updates|TabularV, TabularQ, TDLoss, ActorCritic, PPO|
 |world_models|Tabular|
 |planners|Dyna|
 
@@ -222,7 +222,7 @@ Target을 공급하고 zero_grad/backward/step한다. 수집 당시 detached log
 `data.ActorCriticOutput`은 frozen dataclass다. actor_loss, critic_loss, entropy, total_loss는
 scalar Tensor이고 signed td_error는 `(B,)`다. dtype/device는 모델을 따른다. Rule 출력은 graph를
 유지하고 Learner 출력은 전부 detach된 업데이트 직전 지표다. Model과 Optimizer state_dict,
-행동·환경 RNG를 함께 복원한다. 연속 행동, A3C, PPO, GAE는 이번 범위에 포함하지 않는다.
+행동·환경 RNG를 함께 복원한다. 이 1-step Learner는 연속 행동과 A3C를 지원하지 않는다.
 Vector Rollout의 A2C는 아래 별도 Learner를 사용한다.
 
 ## Vector Rollout and A2C
@@ -307,14 +307,16 @@ losses = rule.compute(new_log_prob, old_log_prob, current_value,
                       returns_flat, advantage_flat, entropy)  # all (B,)
 
 learner = L.PPO(model, optimizer, T.GAE(.99, .95), rule,
-                epochs=4, minibatch_size=64, seed=7, normalize_advantage=True)
+                epochs=4, minibatch_size=64, seed=7, normalize_advantage=True,
+                max_grad_norm=None, target_kl=None)
 result = learner.learn(rollout)
 ```
 
 긴 클래스 이름은 `GAEGenerator`, `PPOUpdateRule`, `PPOLearner`이며 기존 Component/Learner 경로에서도
 import할 수 있다. `modular_rl.data.GAEOutput`은 frozen dataclass의 advantage/returns,
 `PPOOutput`은 policy_loss/value_loss/entropy/total_loss/approx_kl/clip_fraction의 scalar Tensor와
-optimizer_steps 정수다. 새 Buffer나 Base Class는 없다. 기존 Model/Estimator/RolloutBatch 필드는 그대로다.
+optimizer_steps/epochs_completed 정수와 early_stopped bool이다. 실행 통계의 기본값은
+0/0/False이며 기존 7개 positional 인자 생성도 유지한다. 새 Buffer나 Base Class는 없다. 기존 Model/Estimator/RolloutBatch 필드는 그대로다.
 
 GAE 입력은 동일한 nonempty `(T,N)` shape/device다. reward/value/next_value는 동일 floating dtype,
 flags는 bool이다. 자동 Broadcasting/변환/detach가 없으며 Gradient를 보존한다. `next_value[t]`는 실제
@@ -340,21 +342,32 @@ Critic/Entropy 학습은 남고, `normalize_advantage=False`로 원래 Actor 신
 Epoch마다 각 표본을 정확히 한 번 사용하며 마지막 작은 Minibatch도 처리한다.
 
 Rule의 optimizer_steps는 0이며 Loss는 graph를 유지한다. Learner는 detached metrics를 반환한다.
-각 지표는 모든 Epoch의 각 업데이트 직전 Minibatch 지표에 표본 수를 곱해 합한 뒤 `epochs*T*N`으로
-나눈다. 최종 정책의 재평가가 아니다. `approx_kl=mean(ratio-1-log_ratio)`는 표본 기반 비음수 근사이고,
+각 지표는 완료한 업데이트 직전 Minibatch 지표에 표본 수를 곱해 합한 뒤 실제 처리 표본 수로
+나눈다. 조기 종료가 없으면 기존 `epochs*T*N`과 같다. 최종 정책의 재평가가 아니다. `approx_kl=mean(ratio-1-log_ratio)`는 표본 기반 비음수 근사이고,
 `clip_fraction=mean(abs(ratio-1)>clip_epsilon)`은 Advantage 부호에 관계없는 범위 이탈 비율이다.
-KL 조기 종료, Value/Gradient Clipping은 구현하지 않는다.
+max_grad_norm/target_kl은 None 또는 양의 유한 실수다. 두 기본값 None은 기존 계산·RNG·Optimizer
+결과를 유지한다. Clipping은 backward 뒤 Step 전에 Optimizer가 관리하는 학습 가능 Parameter의
+공동 Norm에 적용하고 공유 Parameter는 한 번만 센다. 비유한 Norm은 Step 전에 오류다.
+
+KL은 다음 Epoch가 남은 경우 Epoch 종료 뒤 전체 Rollout에서 eval/no_grad로 재평가한다.
+수집 old_log_prob을 고정하고 위와 같은 mean(exp(log_ratio)-1-log_ratio)가 target_kl을
+초과하면 남은 Epoch를 중단한다. Model 하위 모듈의 원래 모드를 복원하고 BN 통계·Dropout 및
+Shuffle/행동 RNG를 보존한다. 마지막 Epoch 뒤 불필요한 판정은 하지 않는다.
+PPOOutput의 epochs_completed/optimizer_steps는 실제 횟수이며 early_stopped는 남은 Epoch 중단이다.
+반환 approx_kl은 학습 Minibatch 평균으로, Epoch 종료 진단 KL 자체를 반환하는 필드는 아니다.
+Value Clipping은 구현하지 않는다.
 
 CPU `learner.shuffle_rng`는 전용 torch.Generator다. `get_state()`/`set_state()`로 Model/Optimizer와
 함께 저장·복원한다. 환경 RNG와 Torch 행동 RNG는 별개다. Learner는 환경·Buffer를 소유하지 않는다.
-재개할 때 gamma/lam, Rule 계수, epochs/minibatch_size/normalize_advantage 설정도 함께 복원한다.
+재개할 때 gamma/lam, Rule 계수, epochs/minibatch_size/normalize_advantage와
+max_grad_norm/target_kl 설정도 함께 복원한다.
 범용 Checkpoint, 부분 Rollout, NEXT_STEP, 연속 행동 및 Recurrent Policy 지원은 포함하지 않는다.
 
 `L.A2C(model, optimizer, T.GAE(...), U.ActorCritic(...))`도 지원한다. 이 경우 Rule의 선택적
 `compute(..., advantage=...)`가 고정 GAE Actor 신호를 받고 Critic은 Return을 사용한다.
 명시적 advantage가 없으면 기존 `target-value` 경로와 수치·Gradient·Parameter 갱신을 유지한다.
 Model/Optimizer와 환경·Torch RNG, 수집 진행 상태가 checkpoint의 책임이며 Rollout만으로
-학습을 재개하지 않는다. GAE/PPO·연속 행동·Recurrent state·부분 Rollout·NEXT_STEP은 아직 없다.
+학습을 재개하지 않는다. 연속 행동·Recurrent state·부분 Rollout·NEXT_STEP은 아직 없다.
 
-최종 회귀는 2427 passed / 225 CUDA skips이며, Notebook 27개의 Run All 두 번과 기존 예제 18개,
-examples 없는 격리 wheel의 실제 Async GAE/PPO 학습을 포함한다. FULL 결과는 ARCHITECTURE.md에 기록했다.
+
+현재 검증 결과는 [공개 준비 보고](PUBLIC_RELEASE.md), PPO 비교는 [실험 기록](PPO_STABILITY.md)에 있다.
