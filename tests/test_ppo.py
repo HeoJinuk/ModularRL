@@ -25,7 +25,7 @@ def test_t1_n1_first_gradient_parameters_and_momentum_match_actor_critic(dtype,d
     optimizer=torch.optim.SGD(model.parameters(),lr=.05,momentum=.9)
     optimizer.load_state_dict(deepcopy(ac.optimizer.state_dict()))
     ppo=L.PPO(model,optimizer,T.GAE(.9,0),U.PPO(),epochs=1,minibatch_size=1,seed=7,normalize_advantage=False)
-    batch=row(terminated,truncated)
+    batch=row(terminated,truncated).to(device,dtype=dtype)
     with torch.no_grad(): estimate=model(batch.observation)
     from modular_rl.data import RolloutBatch
     rollout=RolloutBatch(*(getattr(batch,name).unsqueeze(0) for name in

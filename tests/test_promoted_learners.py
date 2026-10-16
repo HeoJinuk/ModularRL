@@ -3,6 +3,7 @@ import importlib
 from pathlib import Path
 import subprocess
 import sys
+import venv
 
 import numpy as np
 import pytest
@@ -149,13 +150,17 @@ def test_positional_n_step_dqn_and_legacy_constructor_are_identical():
 def test_installed_wheel_needs_no_examples(tmp_path):
     """Run all six new APIs using only an installed wheel, outside the checkout."""
     root=Path(__file__).resolve().parents[1]
+    # Seed only a disposable installer, including when the test interpreter has no pip.
+    installer=tmp_path/'installer'
+    venv.EnvBuilder(with_pip=True).create(installer)
+    python=installer/('Scripts/python.exe' if sys.platform=='win32' else 'bin/python')
     wheels=tmp_path/'wheels';wheels.mkdir()
-    result=subprocess.run([sys.executable,'-m','pip','wheel','--no-deps','--no-build-isolation',
+    result=subprocess.run([str(python),'-m','pip','wheel','--no-deps',
         '--no-cache-dir','--disable-pip-version-check','--wheel-dir',str(wheels),str(root)],
         cwd=tmp_path,capture_output=True,text=True)
     assert result.returncode==0,result.stdout+result.stderr
     package=tmp_path/'installed'
-    result=subprocess.run([sys.executable,'-m','pip','install','--no-deps','--no-cache-dir',
+    result=subprocess.run([str(python),'-m','pip','install','--no-deps','--no-cache-dir',
         '--disable-pip-version-check','--target',str(package),str(next(wheels.glob('*.whl')))],
         cwd=tmp_path,capture_output=True,text=True)
     assert result.returncode==0,result.stdout+result.stderr
