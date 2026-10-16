@@ -1,0 +1,32 @@
+name: CPU checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install CPU runtime and test tools
+        run: |
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install '.[test]' build twine
+      - name: Public API and core regressions
+        run: python -m pytest -q --ignore=tests/test_dlfs4_notebooks.py --ignore=tests/test_gymnasium_notebooks.py
+      - name: Build and check release artifacts
+        run: |
+          python -m build
+          python -m twine check dist/*
+          python tests/check_distributions.py dist

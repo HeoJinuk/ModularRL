@@ -9,3 +9,12 @@ __pycache__/
 .env
 .env.*
 !.env.example
+.venv/
+venv/
+.tox/
+.ruff_cache/
+.coverage
+htmlcov/
+*.pem
+*.key
+.pypirc

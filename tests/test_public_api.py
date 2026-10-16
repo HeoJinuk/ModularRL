@@ -37,6 +37,21 @@ def test_alias_is_the_original_class(namespace, old_path, short, long_name):
     assert importlib.import_module(original.__module__) is not public
 
 
+@pytest.mark.parametrize('namespace,path',[
+    ('representations','component.representation'),('estimators','component.estimator'),
+    ('selectors','component.action_selector'),('buffers','component.buffer'),
+    ('targets','component.target_generator'),('updates','component.update_rule'),
+    ('learners','learner'),('world_models','component.world_model'),('planners','component.planner'),
+])
+def test_all_concise_exports_preserve_canonical_class_identity(namespace,path):
+    public=importlib.import_module('modular_rl.'+namespace)
+    canonical=importlib.import_module('modular_rl.'+path)
+    assert len(public.__all__)==len(set(public.__all__))
+    for name in public.__all__:
+        original=getattr(public,name)
+        assert getattr(canonical,original.__name__) is original
+
+
 def test_alias_preserves_parameters_buffers_rng_forward_and_pickle():
     from modular_rl.component.representation import MLPRepresentation
     from modular_rl.component.estimator import DiscreteQEstimator

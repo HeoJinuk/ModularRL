@@ -1,0 +1,11 @@
+include README.md LICENSE pyproject.toml MANIFEST.in
+recursive-include modular_rl *.py
+prune tests
+prune notebooks
+prune examples
+prune experiments
+prune docs
+prune .github
+prune .agents
+prune .codex
+global-exclude .DS_Store *.py[cod] .env .env.*
