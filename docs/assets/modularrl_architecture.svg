@@ -75,7 +75,7 @@
 <text x="615" y="528" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#687d92" font-weight="400" text-anchor="start">data</text>
 <text x="852" y="401" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#7251a8" font-weight="400" text-anchor="start">Model</text>
 <text x="852" y="422" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#8b75aa" font-weight="400" text-anchor="start">calls / updates</text>
-<text x="57" y="664" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#775ba0" font-weight="700" text-anchor="start">OPTIONAL  ·  DYNA PLANNING</text>
+<text x="57" y="693" font-family="DejaVu Sans, Arial, sans-serif" font-size="17" fill="#775ba0" font-weight="700" text-anchor="start">OPTIONAL  ·  DYNA PLANNING</text>
 <text x="382" y="699" font-family="DejaVu Sans, Arial, sans-serif" font-size="19" fill="#60428f" font-weight="700" text-anchor="start">TabularWorldModel</text>
 <text x="382" y="725" font-family="DejaVu Sans, Arial, sans-serif" font-size="16" fill="#73658c" font-weight="400" text-anchor="start">Observed transitions</text>
 <text x="695" y="699" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#60428f" font-weight="700" text-anchor="start">DynaPlanner</text>
